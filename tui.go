@@ -523,28 +523,26 @@ func (m tuiModel) View() string {
 	if height <= 0 {
 		height = 36
 	}
+	width = maxInt(1, width-1)
 
 	top := m.renderTopBar(width)
 	bottom := m.renderBottomBar(width)
-	bodyHeight := height - lipgloss.Height(top) - lipgloss.Height(bottom) - 2
-	if bodyHeight < 12 {
-		bodyHeight = 12
-	}
-
-	leftWidth := clamp(width*38/100, 30, 54)
-	if width-leftWidth-1 < 34 {
-		leftWidth = maxInt(24, width-35)
-	}
-	rightWidth := maxInt(30, width-leftWidth-1)
+	bodyHeight := maxInt(1, height-lipgloss.Height(top)-lipgloss.Height(bottom))
+	leftWidth, rightWidth, separator := tuiColumnWidths(width)
 
 	left := m.renderCommitPane(leftWidth, bodyHeight)
 	right := m.renderDetailPane(rightWidth, bodyHeight)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", separator), right)
 
 	return appBaseStyle.Width(width).Render(strings.Join([]string{top, body, bottom}, "\n"))
 }
 
 func (m tuiModel) renderTopBar(width int) string {
+	barStyle := lipgloss.NewStyle().
+		Width(contentWidthFor(lipgloss.NewStyle().Padding(0, 1), width)).
+		Background(lipgloss.Color("#0C1824")).
+		Padding(0, 1)
+	contentWidth := contentWidthFor(barStyle, width)
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(colorCyan).
@@ -568,27 +566,30 @@ func (m tuiModel) renderTopBar(width int) string {
 		flags = "working..."
 	}
 
+	repoWidth := maxInt(4, contentWidth-lipgloss.Width(title)-lipgloss.Width(flags)-6)
 	line := lipgloss.JoinHorizontal(
 		lipgloss.Center,
 		title,
 		"  ",
-		mutedStyle.Render(truncateText(repoText, maxInt(8, width-lipgloss.Width(title)-lipgloss.Width(flags)-8))),
+		mutedStyle.Render(truncateText(repoText, repoWidth)),
 	)
-	line = line + strings.Repeat(" ", maxInt(1, width-lipgloss.Width(line)-lipgloss.Width(flags)-2)) + dimStyle.Render(flags)
+	line = line + strings.Repeat(" ", maxInt(1, contentWidth-lipgloss.Width(line)-lipgloss.Width(flags))) + dimStyle.Render(flags)
+	line = truncateText(line, contentWidth)
 
 	if m.overlay == overlaySearch {
-		search := focusedFieldStyle.Width(width - 4).Render(fieldLabelStyle.Render("Search") + "\n" + m.searchInput.View())
+		search := renderBox(focusedFieldStyle, width, 0, fieldLabelStyle.Render("Search")+"\n"+m.searchInput.View())
 		return lipgloss.NewStyle().Width(width).Render(line + "\n" + search)
 	}
 
-	return lipgloss.NewStyle().
-		Width(width).
-		Background(lipgloss.Color("#0C1824")).
-		Padding(0, 1).
-		Render(line)
+	return barStyle.Render(line)
 }
 
 func (m tuiModel) renderBottomBar(width int) string {
+	barStyle := lipgloss.NewStyle().
+		Width(contentWidthFor(lipgloss.NewStyle().Padding(0, 1), width)).
+		Background(lipgloss.Color("#0C1824")).
+		Padding(0, 1)
+	contentWidth := contentWidthFor(barStyle, width)
 	statusColor := colorCyan
 	switch m.statusKind {
 	case statusSuccess:
@@ -597,7 +598,7 @@ func (m tuiModel) renderBottomBar(width int) string {
 		statusColor = colorRed
 	}
 
-	status := lipgloss.NewStyle().Foreground(statusColor).Render(truncateText(m.status, width-4))
+	status := lipgloss.NewStyle().Foreground(statusColor).Render(truncateText(m.status, contentWidth))
 	help := "Tab form/list  / search  p path  r reload  x reset  a apply  f force  t tags  ? help  q quit"
 	if m.focus == focusForm {
 		help = "Tab next field  Shift+Tab previous  Esc list  Enter newline in message  Ctrl+C quit"
@@ -612,11 +613,7 @@ func (m tuiModel) renderBottomBar(width int) string {
 		help = "Type FORCE then Enter to rewrite and force push, Esc to cancel"
 	}
 
-	return lipgloss.NewStyle().
-		Width(width).
-		Background(lipgloss.Color("#0C1824")).
-		Padding(0, 1).
-		Render(status + "\n" + dimStyle.Render(truncateText(help, width-4)))
+	return barStyle.Render(status + "\n" + dimStyle.Render(truncateText(help, contentWidth)))
 }
 
 func (m tuiModel) renderCommitPane(width int, height int) string {
@@ -624,8 +621,8 @@ func (m tuiModel) renderCommitPane(width int, height int) string {
 	if m.focus == focusList && m.overlay == overlayNone {
 		style = activePanelStyle
 	}
-	innerWidth := maxInt(10, width-2)
-	innerHeight := maxInt(6, height-2)
+	innerWidth := maxInt(1, contentWidthFor(style, width))
+	innerHeight := maxInt(1, contentHeightFor(style, height))
 
 	filtered, selectedIndex, _ := selectionAfterFilter(m.commits, m.draftByHash, m.selectedHash, m.searchInput.Value())
 	header := headerStyle.Render(fmt.Sprintf("Commits %d/%d", len(filtered), len(m.commits)))
@@ -636,7 +633,7 @@ func (m tuiModel) renderCommitPane(width int, height int) string {
 	lines := []string{truncateText(header, innerWidth)}
 	if len(filtered) == 0 {
 		lines = append(lines, "", mutedStyle.Render("No commits match this filter."))
-		return style.Width(width).Height(height).Render(fitLines(lines, innerHeight, innerWidth))
+		return renderBox(style, width, height, fitLines(lines, innerHeight, innerWidth))
 	}
 
 	visibleSlots := maxInt(1, (innerHeight-2)/5)
@@ -656,7 +653,7 @@ func (m tuiModel) renderCommitPane(width int, height int) string {
 		}
 	}
 
-	return style.Width(width).Height(height).Render(fitLines(lines, innerHeight, innerWidth))
+	return renderBox(style, width, height, fitLines(lines, innerHeight, innerWidth))
 }
 
 func (m tuiModel) renderCommitItem(commit CommitRecord, selected bool, width int) string {
@@ -688,9 +685,9 @@ func (m tuiModel) renderCommitItem(commit CommitRecord, selected bool, width int
 	}, "\n")
 
 	if selected {
-		return selectedItemStyle.Width(width).Render(block)
+		return renderBox(selectedItemStyle, width, 0, block)
 	}
-	return itemStyle.Width(width).Render(block)
+	return renderBox(itemStyle, width, 0, block)
 }
 
 func (m tuiModel) renderDetailPane(width int, height int) string {
@@ -698,8 +695,8 @@ func (m tuiModel) renderDetailPane(width int, height int) string {
 	if m.focus == focusForm && m.overlay == overlayNone {
 		style = activePanelStyle
 	}
-	innerWidth := maxInt(20, width-2)
-	innerHeight := maxInt(6, height-2)
+	innerWidth := maxInt(1, contentWidthFor(style, width))
+	innerHeight := maxInt(1, contentHeightFor(style, height))
 
 	var content string
 	switch m.overlay {
@@ -713,7 +710,7 @@ func (m tuiModel) renderDetailPane(width int, height int) string {
 		content = m.renderFormPane(innerWidth, innerHeight)
 	}
 
-	return style.Width(width).Height(height).Render(content)
+	return renderBox(style, width, height, content)
 }
 
 func (m tuiModel) renderPathPane(width int, height int) string {
@@ -722,7 +719,7 @@ func (m tuiModel) renderPathPane(width int, height int) string {
 		"",
 		"Enter a Git worktree path. Nexus starts with the current directory, but you can switch repositories here at any time.",
 		"",
-		focusedFieldStyle.Width(width).Render(fieldLabelStyle.Render("Path") + "\n" + m.pathInput.View()),
+		renderBox(focusedFieldStyle, width, 0, fieldLabelStyle.Render("Path")+"\n"+m.pathInput.View()),
 		"",
 		dimStyle.Render("Press Enter to load. Press Esc to return to the current repository."),
 	}
@@ -743,7 +740,7 @@ func (m tuiModel) renderConfirmPane(width int, height int) string {
 			lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("Force push is enabled."),
 			"Type FORCE to confirm rewriting history and pushing with --force-with-lease.",
 			"",
-			focusedFieldStyle.Width(minInt(width, 24)).Render(fieldLabelStyle.Render("Confirmation")+"\n"+m.confirmInput.View()),
+			renderBox(focusedFieldStyle, minInt(width, 24), 0, fieldLabelStyle.Render("Confirmation")+"\n"+m.confirmInput.View()),
 		)
 	} else {
 		lines = append(lines, "", "Press y to continue, or n/Esc to cancel.")
@@ -794,7 +791,7 @@ func (m tuiModel) renderFormPane(width int, height int) string {
 	lines := []string{headerStyle.Render(truncateText(title, width)), ""}
 
 	cellGap := 2
-	cellWidth := maxInt(18, (width-cellGap)/2)
+	cellWidth := maxInt(1, (width-cellGap)/2)
 	rows := [][2]int{
 		{formAuthorName, formAuthorEmail},
 		{formAuthorDate, formCommitterName},
@@ -809,10 +806,17 @@ func (m tuiModel) renderFormPane(width int, height int) string {
 		"Committer date",
 	}
 
-	for _, row := range rows {
-		left := m.renderTextField(row[0], labels[row[0]], cellWidth)
-		right := m.renderTextField(row[1], labels[row[1]], cellWidth)
-		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", cellGap), right))
+	if width >= 44 {
+		for _, row := range rows {
+			left := m.renderTextField(row[0], labels[row[0]], cellWidth)
+			right := m.renderTextField(row[1], labels[row[1]], cellWidth)
+			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", cellGap), right))
+		}
+	} else {
+		for _, row := range rows {
+			lines = append(lines, m.renderTextField(row[0], labels[row[0]], width))
+			lines = append(lines, m.renderTextField(row[1], labels[row[1]], width))
+		}
 	}
 
 	messageHeight := clamp(height-lipgloss.Height(strings.Join(lines, "\n"))-8, 5, 10)
@@ -840,7 +844,7 @@ func (m tuiModel) renderTextField(index int, label string, width int) string {
 	if m.focus == focusForm && m.overlay == overlayNone && m.formFocus == index {
 		style = focusedFieldStyle
 	}
-	return style.Width(width).Render(fieldLabelStyle.Render(label) + "\n" + m.inputs[index].View())
+	return renderBox(style, width, 0, fieldLabelStyle.Render(label)+"\n"+m.inputs[index].View())
 }
 
 func (m tuiModel) renderMessageField(width int, height int) string {
@@ -848,7 +852,7 @@ func (m tuiModel) renderMessageField(width int, height int) string {
 	if m.focus == focusForm && m.overlay == overlayNone && m.formFocus == formMessage {
 		style = focusedFieldStyle
 	}
-	return style.Width(width).Height(height).Render(fieldLabelStyle.Render("Commit message") + "\n" + m.message.View())
+	return renderBox(style, width, height, fieldLabelStyle.Render("Commit message")+"\n"+m.message.View())
 }
 
 func (m *tuiModel) updateComponentSizes() {
@@ -860,21 +864,17 @@ func (m *tuiModel) updateComponentSizes() {
 	if height <= 0 {
 		height = 36
 	}
-	leftWidth := clamp(width*38/100, 30, 54)
-	if width-leftWidth-1 < 34 {
-		leftWidth = maxInt(24, width-35)
-	}
-	rightWidth := maxInt(30, width-leftWidth-1)
-	innerRight := maxInt(20, rightWidth-4)
+	_, rightWidth, _ := tuiColumnWidths(width)
+	innerRight := maxInt(1, contentWidthFor(panelStyle, rightWidth))
 	cellWidth := maxInt(18, (innerRight-2)/2)
 
 	for i := range m.inputs {
-		m.inputs[i].Width = maxInt(8, cellWidth-4)
+		m.inputs[i].Width = maxInt(4, contentWidthFor(blurredFieldStyle, cellWidth))
 	}
-	m.message.SetWidth(maxInt(12, innerRight-4))
+	m.message.SetWidth(maxInt(4, contentWidthFor(blurredFieldStyle, innerRight)))
 	m.message.SetHeight(clamp(height/4, 5, 10))
 	m.searchInput.Width = maxInt(16, width-10)
-	m.pathInput.Width = maxInt(20, innerRight-8)
+	m.pathInput.Width = maxInt(4, contentWidthFor(focusedFieldStyle, innerRight))
 	m.confirmInput.Width = 12
 }
 
@@ -1225,11 +1225,16 @@ func wrapBlockLines(lines []string, width int) []string {
 
 func fitLines(lines []string, height int, width int) string {
 	out := make([]string, 0, height)
-	for _, line := range lines {
+	for _, block := range lines {
+		for _, line := range strings.Split(block, "\n") {
+			if len(out) >= height {
+				break
+			}
+			out = append(out, truncateText(line, width))
+		}
 		if len(out) >= height {
 			break
 		}
-		out = append(out, truncateText(line, width))
 	}
 	for len(out) < height {
 		out = append(out, "")
@@ -1326,4 +1331,50 @@ func maxInt(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func contentWidthFor(style lipgloss.Style, outerWidth int) int {
+	return maxInt(1, outerWidth-style.GetHorizontalFrameSize())
+}
+
+func contentHeightFor(style lipgloss.Style, outerHeight int) int {
+	return maxInt(1, outerHeight-style.GetVerticalFrameSize())
+}
+
+func renderBox(style lipgloss.Style, outerWidth int, outerHeight int, content string) string {
+	if outerWidth > 0 {
+		style = style.Width(contentWidthFor(style, outerWidth))
+	}
+	if outerHeight > 0 {
+		style = style.Height(contentHeightFor(style, outerHeight))
+	}
+	return style.Render(content)
+}
+
+func tuiColumnWidths(totalWidth int) (int, int, int) {
+	if totalWidth <= 2 {
+		return maxInt(1, totalWidth), 1, 0
+	}
+
+	separator := 1
+	if totalWidth < 50 {
+		separator = 0
+	}
+
+	left := clamp(totalWidth*38/100, 24, 54)
+	minRight := 24
+	if totalWidth < 70 {
+		minRight = maxInt(10, totalWidth/2)
+	}
+	maxLeft := totalWidth - separator - minRight
+	if maxLeft < 10 {
+		maxLeft = maxInt(1, totalWidth-separator-1)
+	}
+	left = clamp(left, 1, maxLeft)
+	right := totalWidth - separator - left
+	if right < 1 {
+		right = 1
+		left = maxInt(1, totalWidth-separator-right)
+	}
+	return left, right, separator
 }

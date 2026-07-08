@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
@@ -110,4 +111,48 @@ func TestRepositoryLoadErrorOpensPathEntryState(t *testing.T) {
 	if model.pathInput.Value() != path {
 		t.Fatalf("expected path input to keep attempted path %q, got %q", path, model.pathInput.Value())
 	}
+}
+
+func TestViewFitsTerminalDimensions(t *testing.T) {
+	model := newTUIModel(NewApp(), "/tmp/repo")
+	model.width = 80
+	model.height = 24
+
+	initialView := model.View()
+	if height := lipgloss.Height(initialView); height > model.height {
+		t.Fatalf("expected initial view height <= %d, got %d", model.height, height)
+	}
+	if width := maxRenderedLineWidth(initialView); width > model.width-1 {
+		t.Fatalf("expected initial max line width <= %d, got %d", model.width-1, width)
+	}
+
+	model.handleRepoLoaded(repoLoadedMsg{
+		repo: RepositoryState{
+			Path:          "/tmp/repo",
+			Clean:         true,
+			CurrentBranch: "main",
+		},
+		commits: []CommitRecord{
+			{Hash: "1111111111111111111111111111111111111111", ShortHash: "1111111", AuthorName: "Ada Lovelace", AuthorEmail: "ada@example.com", AuthorDate: "2024-01-01T10:00:00Z", CommitterName: "Ada Lovelace", CommitterEmail: "ada@example.com", CommitterDate: "2024-01-01T10:00:00Z", Message: "Add a compact terminal interface that should not wrap every line"},
+			{Hash: "2222222222222222222222222222222222222222", ShortHash: "2222222", AuthorName: "Grace Hopper", AuthorEmail: "grace@example.com", AuthorDate: "2024-01-02T10:00:00Z", CommitterName: "Grace Hopper", CommitterEmail: "grace@example.com", CommitterDate: "2024-01-02T10:00:00Z", Message: "Fix rendering dimensions"},
+		},
+	})
+
+	view := model.View()
+	if height := lipgloss.Height(view); height > model.height {
+		t.Fatalf("expected view height <= %d, got %d", model.height, height)
+	}
+	if width := maxRenderedLineWidth(view); width > model.width-1 {
+		t.Fatalf("expected max line width <= %d, got %d", model.width-1, width)
+	}
+}
+
+func maxRenderedLineWidth(value string) int {
+	width := 0
+	for _, line := range strings.Split(value, "\n") {
+		if lineWidth := lipgloss.Width(line); lineWidth > width {
+			width = lineWidth
+		}
+	}
+	return width
 }
