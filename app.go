@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -47,13 +48,15 @@ type CommitRecord struct {
 }
 
 type ApplyRequest struct {
-	Commits   []CommitRecord `json:"commits"`
-	ForcePush bool           `json:"forcePush"`
-	PushTags  bool           `json:"pushTags"`
+	Commits         []CommitRecord `json:"commits"`
+	ForcePush       bool           `json:"forcePush"`
+	PushTags        bool           `json:"pushTags"`
+	RemoveCoAuthors bool           `json:"removeCoAuthors"`
 }
 
 type ApplyResult struct {
 	RewrittenCommits int      `json:"rewrittenCommits"`
+	RemovedCoAuthors int      `json:"removedCoAuthors"`
 	ForcePushed      bool     `json:"forcePushed"`
 	BackupReference  string   `json:"backupReference"`
 	Warnings         []string `json:"warnings"`
@@ -156,23 +159,31 @@ func (a *App) ApplyChanges(req ApplyRequest) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 
-	currentByHash := make(map[string]CommitRecord, len(currentHistory))
-	for _, commit := range currentHistory {
-		currentByHash[commit.Hash] = commit
+	incomingByHash := make(map[string]CommitRecord, len(req.Commits))
+	for _, incoming := range req.Commits {
+		incomingByHash[incoming.Hash] = incoming
 	}
 
 	updatedByHash := make(map[string]CommitRecord)
 	messageOverride := make(map[string]bool)
+	removedCoAuthors := 0
 
-	for _, incoming := range req.Commits {
-		current, exists := currentByHash[incoming.Hash]
+	for _, current := range currentHistory {
+		incoming, exists := incomingByHash[current.Hash]
 		if !exists {
-			continue
+			incoming = current
 		}
 
 		normalized, err := normalizeIncomingCommit(incoming, current)
 		if err != nil {
 			return ApplyResult{}, fmt.Errorf("commit %s is invalid: %w", incoming.ShortHash, err)
+		}
+
+		if req.RemoveCoAuthors {
+			var removed int
+			normalized.Message, removed = removeCoAuthorLines(normalized.Message)
+			normalized.Subject = firstLine(normalized.Message)
+			removedCoAuthors += removed
 		}
 
 		if editableFieldsChanged(current, normalized) {
@@ -183,6 +194,7 @@ func (a *App) ApplyChanges(req ApplyRequest) (ApplyResult, error) {
 
 	result := ApplyResult{
 		RewrittenCommits: len(updatedByHash),
+		RemovedCoAuthors: removedCoAuthors,
 		Warnings:         []string{},
 	}
 
@@ -468,17 +480,29 @@ func normalizeIncomingCommit(incoming CommitRecord, current CommitRecord) (Commi
 }
 
 func normalizeGitDate(input string) (string, error) {
+	parsed, err := parseGitDate(input)
+	if err != nil {
+		return "", err
+	}
+	return formatGitDate(parsed), nil
+}
+
+func parseGitDate(input string) (time.Time, error) {
 	date := strings.TrimSpace(input)
 	if date == "" {
-		return "", errors.New("date cannot be empty")
+		return time.Time{}, errors.New("date cannot be empty")
 	}
 
 	layouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,
+		"2006-01-02 15:04:05 -0700",
+		time.RFC1123Z,
+		time.RFC822Z,
 		"2006-01-02T15:04:05",
 		"2006-01-02T15:04",
 		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
 	}
 
 	for _, layout := range layouts {
@@ -487,27 +511,56 @@ func normalizeGitDate(input string) (string, error) {
 			err error
 		)
 
-		if layout == time.RFC3339 || layout == time.RFC3339Nano {
+		if strings.Contains(layout, "Z07") || strings.Contains(layout, "-0700") || layout == time.RFC1123Z || layout == time.RFC822Z {
 			t, err = time.Parse(layout, date)
 		} else {
 			t, err = time.ParseInLocation(layout, date, time.Local)
 		}
 		if err == nil {
-			return t.Format("2006-01-02T15:04:05-07:00"), nil
+			return t, nil
 		}
 	}
 
-	return "", errors.New("date must be RFC3339 or YYYY-MM-DDTHH:MM[:SS]")
+	return time.Time{}, errors.New("date must be ISO 8601, a standard Git date, or YYYY-MM-DD HH:MM[:SS]")
+}
+
+func formatGitDate(value time.Time) string {
+	return value.Format("2006-01-02T15:04:05-07:00")
+}
+
+var coAuthorLinePattern = regexp.MustCompile(`(?i)^\s*co-authored(?:-|\s+)by\s*:`)
+
+func removeCoAuthorLines(message string) (string, int) {
+	lines := strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n")
+	kept := make([]string, 0, len(lines))
+	removed := 0
+	for _, line := range lines {
+		if coAuthorLinePattern.MatchString(line) {
+			removed++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return normalizeMessage(strings.Join(kept, "\n")), removed
 }
 
 func editableFieldsChanged(current CommitRecord, incoming CommitRecord) bool {
 	return current.AuthorName != incoming.AuthorName ||
 		current.AuthorEmail != incoming.AuthorEmail ||
-		current.AuthorDate != incoming.AuthorDate ||
+		!gitDatesEqual(current.AuthorDate, incoming.AuthorDate) ||
 		current.CommitterName != incoming.CommitterName ||
 		current.CommitterEmail != incoming.CommitterEmail ||
-		current.CommitterDate != incoming.CommitterDate ||
+		!gitDatesEqual(current.CommitterDate, incoming.CommitterDate) ||
 		normalizeMessage(current.Message) != normalizeMessage(incoming.Message)
+}
+
+func gitDatesEqual(left string, right string) bool {
+	leftDate, leftErr := normalizeGitDate(left)
+	rightDate, rightErr := normalizeGitDate(right)
+	if leftErr != nil || rightErr != nil {
+		return strings.TrimSpace(left) == strings.TrimSpace(right)
+	}
+	return leftDate == rightDate
 }
 
 func firstLine(message string) string {
@@ -539,7 +592,7 @@ func shellQuote(value string) string {
 
 func runGit(repo string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), "FILTER_BRANCH_SQUELCH_WARNING=1")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

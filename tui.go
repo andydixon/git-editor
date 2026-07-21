@@ -40,6 +40,7 @@ const (
 	overlayConfirmApply
 	overlayConfirmForce
 	overlayHelp
+	overlayDatePicker
 )
 
 type statusKind string
@@ -142,13 +143,16 @@ type tuiModel struct {
 	inputs    []textinput.Model
 	message   textarea.Model
 
-	searchInput  textinput.Model
-	pathInput    textinput.Model
-	confirmInput textinput.Model
+	searchInput      textinput.Model
+	pathInput        textinput.Model
+	confirmInput     textinput.Model
+	datePickerTime   time.Time
+	datePickerTarget int
 
-	forcePush bool
-	pushTags  bool
-	busy      bool
+	forcePush       bool
+	pushTags        bool
+	removeCoAuthors bool
+	busy            bool
 
 	status     string
 	statusKind statusKind
@@ -283,6 +287,7 @@ func (m *tuiModel) handleApplyFinished(msg applyFinishedMsg) {
 		m.repoLoaded = true
 	}
 	if msg.commits != nil {
+		m.removeCoAuthors = false
 		m.commits = newestFirst(msg.commits)
 		m.originalByHash = mapByHash(m.commits)
 		m.draftByHash = cloneMapByHash(m.commits)
@@ -315,6 +320,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updatePathEntry(msg)
 	case overlayConfirmApply, overlayConfirmForce:
 		return m.updateConfirmation(msg)
+	case overlayDatePicker:
+		return m.updateDatePicker(msg)
 	}
 
 	if m.focus == focusForm {
@@ -347,6 +354,10 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		m.pushTags = !m.pushTags
 		m.setStatus(fmt.Sprintf("Push tags %s", onOff(m.pushTags)), statusInfo)
+	case "c":
+		m.removeCoAuthors = !m.removeCoAuthors
+		count, lines := coAuthorCleanupImpact(m.commits, m.draftByHash)
+		m.setStatus(fmt.Sprintf("Co-author cleanup %s: %d line%s across %d commit%s", onOff(m.removeCoAuthors), lines, plural(lines), count, plural(count)), statusInfo)
 	case "a":
 		return m.beginApply()
 	case "x":
@@ -451,12 +462,35 @@ func (m tuiModel) updateConfirmation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m tuiModel) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	switch key {
+	case "enter":
+		if m.formFocus == formAuthorDate || m.formFocus == formCommitterDate {
+			selected, err := parseGitDate(m.inputs[m.formFocus].Value())
+			if err != nil {
+				m.setStatus(fmt.Sprintf("Cannot open date picker: %v", err), statusError)
+				return m, nil
+			}
+			m.datePickerTime = selected
+			m.datePickerTarget = m.formFocus
+			m.overlay = overlayDatePicker
+			m.blurForm()
+			m.setStatus("Date/time picker opened.", statusInfo)
+			return m, nil
+		}
+	case "ctrl+t":
+		if m.formFocus == formAuthorDate || m.formFocus == formCommitterDate {
+			m.inputs[m.formFocus].SetValue(time.Now().Format("2006-01-02T15:04:05-07:00"))
+			m.syncFormToDraft()
+			m.setStatus("Updated the focused date/time to now.", statusInfo)
+		}
+		return m, nil
 	case "esc":
+		m.normalizeFocusedDateInput()
 		m.syncFormToDraft()
 		m.focus = focusList
 		m.blurForm()
 		return m, nil
 	case "tab", "shift+tab":
+		m.normalizeFocusedDateInput()
 		m.syncFormToDraft()
 		next, returnToList := nextFormFocus(m.formFocus, key == "shift+tab")
 		if returnToList {
@@ -478,6 +512,50 @@ func (m tuiModel) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m tuiModel) updateDatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.overlay = overlayNone
+		m.focusFormField(m.datePickerTarget)
+		m.setStatus("Date/time change cancelled.", statusInfo)
+	case "enter":
+		m.inputs[m.datePickerTarget].SetValue(formatGitDate(m.datePickerTime))
+		m.overlay = overlayNone
+		m.focusFormField(m.datePickerTarget)
+		m.syncFormToDraft()
+		m.setStatus("Date/time updated.", statusInfo)
+	case "left", "h":
+		m.datePickerTime = m.datePickerTime.AddDate(0, 0, -1)
+	case "right", "l":
+		m.datePickerTime = m.datePickerTime.AddDate(0, 0, 1)
+	case "up", "k":
+		m.datePickerTime = m.datePickerTime.Add(time.Hour)
+	case "down", "j":
+		m.datePickerTime = m.datePickerTime.Add(-time.Hour)
+	case "pgup", "[":
+		m.datePickerTime = shiftCalendarMonth(m.datePickerTime, -1)
+	case "pgdown", "]":
+		m.datePickerTime = shiftCalendarMonth(m.datePickerTime, 1)
+	case "shift+left", "H":
+		m.datePickerTime = shiftCalendarYear(m.datePickerTime, -1)
+	case "shift+right", "L":
+		m.datePickerTime = shiftCalendarYear(m.datePickerTime, 1)
+	case "-", "_":
+		m.datePickerTime = m.datePickerTime.Add(-5 * time.Minute)
+	case "+", "=":
+		m.datePickerTime = m.datePickerTime.Add(5 * time.Minute)
+	case "t":
+		m.datePickerTime = time.Now()
+	case "u":
+		m.datePickerTime = sameWallClockIn(m.datePickerTime, time.UTC)
+	case "z":
+		m.datePickerTime = sameWallClockIn(m.datePickerTime, time.Local)
+	case "0":
+		m.datePickerTime = m.datePickerTime.Add(-time.Duration(m.datePickerTime.Second()) * time.Second)
+	}
+	return m, nil
+}
+
 func (m tuiModel) beginApply() (tea.Model, tea.Cmd) {
 	if !m.repoLoaded {
 		m.setStatus("Load a repository before applying changes.", statusError)
@@ -485,9 +563,13 @@ func (m tuiModel) beginApply() (tea.Model, tea.Cmd) {
 	}
 
 	m.syncFormToDraft()
-	count := dirtyCommitCount(m.commits, m.originalByHash, m.draftByHash)
+	if err := validateDraftDates(m.commits, m.draftByHash); err != nil {
+		m.setStatus(err.Error(), statusError)
+		return m, nil
+	}
+	count := plannedRewriteCount(m.commits, m.originalByHash, m.draftByHash, m.removeCoAuthors)
 	if count == 0 && !m.forcePush {
-		m.setStatus("No history edits to apply.", statusInfo)
+		m.setStatus("No history edits or co-author lines to apply.", statusInfo)
 		return m, nil
 	}
 
@@ -561,7 +643,7 @@ func (m tuiModel) renderTopBar(width int) string {
 		repoText = fmt.Sprintf("%s  %s  %s", filepath.Base(m.repository.Path), branch, clean)
 	}
 
-	flags := fmt.Sprintf("force:%s tags:%s edits:%d", onOff(m.forcePush), onOff(m.pushTags), dirtyCommitCount(m.commits, m.originalByHash, m.draftByHash))
+	flags := fmt.Sprintf("force:%s tags:%s coauthors:%s edits:%d", onOff(m.forcePush), onOff(m.pushTags), onOff(m.removeCoAuthors), plannedRewriteCount(m.commits, m.originalByHash, m.draftByHash, m.removeCoAuthors))
 	if m.busy {
 		flags = "working..."
 	}
@@ -599,9 +681,9 @@ func (m tuiModel) renderBottomBar(width int) string {
 	}
 
 	status := lipgloss.NewStyle().Foreground(statusColor).Render(truncateText(m.status, contentWidth))
-	help := "Tab form/list  / search  p path  r reload  x reset  a apply  f force  t tags  ? help  q quit"
+	help := "Tab form/list  / search  p path  r reload  x reset  a apply  c co-authors  f force  t tags  ? help  q quit"
 	if m.focus == focusForm {
-		help = "Tab next field  Shift+Tab previous  Esc list  Enter newline in message  Ctrl+C quit"
+		help = "Tab next field  Shift+Tab previous  Ctrl+T set focused date to now  Esc list  Ctrl+C quit"
 	}
 	if m.overlay == overlayPath {
 		help = "Enter load repository  Esc close"
@@ -611,6 +693,9 @@ func (m tuiModel) renderBottomBar(width int) string {
 	}
 	if m.overlay == overlayConfirmForce {
 		help = "Type FORCE then Enter to rewrite and force push, Esc to cancel"
+	}
+	if m.overlay == overlayDatePicker {
+		help = "←/→ day  ↑/↓ hour  PgUp/PgDn month  +/- 5 min  H/L year  t now  z local  u UTC  Enter save  Esc cancel"
 	}
 
 	return barStyle.Render(status + "\n" + dimStyle.Render(truncateText(help, contentWidth)))
@@ -706,11 +791,45 @@ func (m tuiModel) renderDetailPane(width int, height int) string {
 		content = m.renderConfirmPane(innerWidth, innerHeight)
 	case overlayHelp:
 		content = m.renderHelpPane(innerWidth, innerHeight)
+	case overlayDatePicker:
+		content = m.renderDatePickerPane(innerWidth, innerHeight)
 	default:
 		content = m.renderFormPane(innerWidth, innerHeight)
 	}
 
 	return renderBox(style, width, height, content)
+}
+
+func (m tuiModel) renderDatePickerPane(width int, height int) string {
+	target := "Author date"
+	if m.datePickerTarget == formCommitterDate {
+		target = "Committer date"
+	}
+	zoneName, offset := m.datePickerTime.Zone()
+	if zoneName == "" {
+		zoneName = formatZoneOffset(offset)
+	} else {
+		zoneName = fmt.Sprintf("%s (%s)", zoneName, formatZoneOffset(offset))
+	}
+
+	lines := []string{
+		headerStyle.Render("Date & Time Picker"),
+		mutedStyle.Render(target),
+		"",
+		lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(m.datePickerTime.Format("Monday, 02 January 2006")),
+		lipgloss.NewStyle().Bold(true).Foreground(colorCyan).Render(m.datePickerTime.Format("15:04:05") + "  " + zoneName),
+		"",
+	}
+	lines = append(lines, renderMonthCalendar(m.datePickerTime)...)
+	lines = append(lines,
+		"",
+		"←/→ or h/l  day        ↑/↓ or k/j  hour",
+		"PgUp/PgDn or [/]  month   H/L  year   +/-  five minutes",
+		"t  now    z  local timezone    u  UTC    0  clear seconds",
+		"",
+		dimStyle.Render("Enter saves the selection. Esc keeps the original timestamp."),
+	)
+	return fitLines(lines, height, width)
 }
 
 func (m tuiModel) renderPathPane(width int, height int) string {
@@ -727,11 +846,15 @@ func (m tuiModel) renderPathPane(width int, height int) string {
 }
 
 func (m tuiModel) renderConfirmPane(width int, height int) string {
-	count := dirtyCommitCount(m.commits, m.originalByHash, m.draftByHash)
+	count := plannedRewriteCount(m.commits, m.originalByHash, m.draftByHash, m.removeCoAuthors)
+	coAuthorCommits, coAuthorLines := coAuthorCleanupImpact(m.commits, m.draftByHash)
 	lines := []string{
 		headerStyle.Render("Confirm Rewrite"),
 		"",
 		fmt.Sprintf("This will rewrite Git history for %d edited commit%s. A backup tag will be created first.", count, plural(count)),
+	}
+	if m.removeCoAuthors {
+		lines = append(lines, "", fmt.Sprintf("Co-author cleanup will remove %d matching line%s from %d commit%s.", coAuthorLines, plural(coAuthorLines), coAuthorCommits, plural(coAuthorCommits)))
 	}
 
 	if m.forcePush {
@@ -757,7 +880,8 @@ func (m tuiModel) renderHelpPane(width int, height int) string {
 		"Tab moves from the list into the commit form.",
 		"Form: Tab and Shift+Tab move through every editable value. Esc returns to the list.",
 		"/ searches commits. p opens a repository path prompt. r reloads history.",
-		"x resets the selected commit. a applies edits. f toggles force push. t toggles tag push.",
+		"x resets the selected commit. a applies edits. c toggles bulk Co-authored-by cleanup.",
+		"f toggles force push. t toggles tag push. Ctrl+T stamps the focused date field with the current local time.",
 		"",
 		headerStyle.Render("Safety"),
 		"",
@@ -1004,6 +1128,15 @@ func (m *tuiModel) syncFormToDraft() {
 	m.draftByHash[m.selectedHash] = draft
 }
 
+func (m *tuiModel) normalizeFocusedDateInput() {
+	if m.formFocus != formAuthorDate && m.formFocus != formCommitterDate {
+		return
+	}
+	if normalized, err := normalizeGitDate(m.inputs[m.formFocus].Value()); err == nil {
+		m.inputs[m.formFocus].SetValue(normalized)
+	}
+}
+
 func (m *tuiModel) resetSelectedCommit() {
 	if m.selectedHash == "" {
 		return
@@ -1027,9 +1160,10 @@ func (m tuiModel) applyRequest() ApplyRequest {
 		commits = append(commits, cloneCommitRecord(draft))
 	}
 	return ApplyRequest{
-		Commits:   commits,
-		ForcePush: m.forcePush,
-		PushTags:  m.pushTags,
+		Commits:         commits,
+		ForcePush:       m.forcePush,
+		PushTags:        m.pushTags,
+		RemoveCoAuthors: m.removeCoAuthors,
 	}
 }
 
@@ -1144,6 +1278,46 @@ func dirtyCommitCount(commits []CommitRecord, originalByHash map[string]CommitRe
 		}
 	}
 	return count
+}
+
+func plannedRewriteCount(commits []CommitRecord, originalByHash map[string]CommitRecord, draftByHash map[string]CommitRecord, removeCoAuthors bool) int {
+	count := 0
+	for _, commit := range commits {
+		dirty := commitDirty(commit.Hash, originalByHash, draftByHash)
+		draft := draftByHash[commit.Hash]
+		_, coAuthorLines := removeCoAuthorLines(draft.Message)
+		if dirty || (removeCoAuthors && coAuthorLines > 0) {
+			count++
+		}
+	}
+	return count
+}
+
+func coAuthorCleanupImpact(commits []CommitRecord, draftByHash map[string]CommitRecord) (int, int) {
+	commitCount := 0
+	lineCount := 0
+	for _, commit := range commits {
+		draft := draftByHash[commit.Hash]
+		_, removed := removeCoAuthorLines(draft.Message)
+		if removed > 0 {
+			commitCount++
+			lineCount += removed
+		}
+	}
+	return commitCount, lineCount
+}
+
+func validateDraftDates(commits []CommitRecord, draftByHash map[string]CommitRecord) error {
+	for _, commit := range commits {
+		draft := draftByHash[commit.Hash]
+		if _, err := normalizeGitDate(draft.AuthorDate); err != nil {
+			return fmt.Errorf("commit %s has an invalid author date: %v", draft.ShortHash, err)
+		}
+		if _, err := normalizeGitDate(draft.CommitterDate); err != nil {
+			return fmt.Errorf("commit %s has an invalid committer date: %v", draft.ShortHash, err)
+		}
+	}
+	return nil
 }
 
 func commitDirty(hash string, originalByHash map[string]CommitRecord, draftByHash map[string]CommitRecord) bool {
@@ -1273,6 +1447,61 @@ func formatCommitTime(value string) string {
 	return parsed.Local().Format("2006-01-02 15:04")
 }
 
+func sameWallClockIn(value time.Time, location *time.Location) time.Time {
+	return time.Date(value.Year(), value.Month(), value.Day(), value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), location)
+}
+
+func shiftCalendarMonth(value time.Time, months int) time.Time {
+	targetMonth := time.Date(value.Year(), value.Month()+time.Month(months), 1, value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), value.Location())
+	day := minInt(value.Day(), targetMonth.AddDate(0, 1, -1).Day())
+	return time.Date(targetMonth.Year(), targetMonth.Month(), day, value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), value.Location())
+}
+
+func shiftCalendarYear(value time.Time, years int) time.Time {
+	targetYear := value.Year() + years
+	lastDay := time.Date(targetYear, value.Month()+1, 0, value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), value.Location()).Day()
+	return time.Date(targetYear, value.Month(), minInt(value.Day(), lastDay), value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), value.Location())
+}
+
+func formatZoneOffset(offsetSeconds int) string {
+	sign := "+"
+	if offsetSeconds < 0 {
+		sign = "-"
+		offsetSeconds = -offsetSeconds
+	}
+	return fmt.Sprintf("%s%02d:%02d", sign, offsetSeconds/3600, (offsetSeconds%3600)/60)
+}
+
+func renderMonthCalendar(selected time.Time) []string {
+	first := time.Date(selected.Year(), selected.Month(), 1, 0, 0, 0, 0, selected.Location())
+	leading := (int(first.Weekday()) + 6) % 7
+	daysInMonth := first.AddDate(0, 1, -1).Day()
+
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(colorMagenta).Render(selected.Format("January 2006")),
+		dimStyle.Render("Mo Tu We Th Fr Sa Su"),
+	}
+	week := make([]string, 7)
+	for day := 1; day <= daysInMonth; day++ {
+		position := leading + day - 1
+		cell := fmt.Sprintf("%2d", day)
+		if day == selected.Day() {
+			cell = lipgloss.NewStyle().Bold(true).Foreground(colorPanel).Background(colorCyan).Render(cell)
+		}
+		week[position%7] = cell
+		if position%7 == 6 || day == daysInMonth {
+			for index := range week {
+				if week[index] == "" {
+					week[index] = "  "
+				}
+			}
+			lines = append(lines, strings.Join(week, " "))
+			week = make([]string, 7)
+		}
+	}
+	return lines
+}
+
 func applyResultSummary(result ApplyResult) string {
 	parts := []string{}
 	if result.RewrittenCommits == 0 {
@@ -1282,6 +1511,9 @@ func applyResultSummary(result ApplyResult) string {
 	}
 	if result.BackupReference != "" {
 		parts = append(parts, "Backup "+result.BackupReference+".")
+	}
+	if result.RemovedCoAuthors > 0 {
+		parts = append(parts, fmt.Sprintf("Removed %d co-author line%s.", result.RemovedCoAuthors, plural(result.RemovedCoAuthors)))
 	}
 	if result.ForcePushed {
 		parts = append(parts, "Force push completed.")

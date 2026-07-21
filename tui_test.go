@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -144,6 +146,58 @@ func TestViewFitsTerminalDimensions(t *testing.T) {
 	}
 	if width := maxRenderedLineWidth(view); width > model.width-1 {
 		t.Fatalf("expected max line width <= %d, got %d", model.width-1, width)
+	}
+}
+
+func TestDatePickerOpensAndSavesFromDateField(t *testing.T) {
+	model := newTUIModel(NewApp(), "/tmp/repo")
+	commit := CommitRecord{
+		Hash: "one", ShortHash: "one", AuthorName: "A", AuthorEmail: "a@example.com",
+		AuthorDate: "2024-01-02T10:00:00+00:00", CommitterName: "A", CommitterEmail: "a@example.com",
+		CommitterDate: "2024-01-02T10:00:00+00:00", Message: "subject",
+	}
+	model.handleRepoLoaded(repoLoadedMsg{repo: RepositoryState{Path: "/tmp/repo"}, commits: []CommitRecord{commit}})
+	model.focus = focusForm
+	model.focusFormField(formAuthorDate)
+
+	updated, _ := model.updateForm(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(tuiModel)
+	if model.overlay != overlayDatePicker {
+		t.Fatalf("expected date picker overlay, got %v", model.overlay)
+	}
+
+	model.datePickerTime = time.Date(2025, time.March, 4, 12, 35, 45, 0, time.FixedZone("test", 90*60))
+	updated, _ = model.updateDatePicker(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(tuiModel)
+	if got := model.draftByHash["one"].AuthorDate; got != "2025-03-04T12:35:45+01:30" {
+		t.Fatalf("expected selected date to be saved, got %q", got)
+	}
+}
+
+func TestPlannedRewriteCountIncludesCoAuthorCleanup(t *testing.T) {
+	commits := []CommitRecord{
+		{Hash: "one", Message: "subject\n\nCo-authored-by: A <a@example.com>"},
+		{Hash: "two", Message: "another subject"},
+	}
+	original := mapByHash(commits)
+	drafts := cloneMapByHash(commits)
+
+	if got := plannedRewriteCount(commits, original, drafts, false); got != 0 {
+		t.Fatalf("expected no planned rewrites with cleanup disabled, got %d", got)
+	}
+	if got := plannedRewriteCount(commits, original, drafts, true); got != 1 {
+		t.Fatalf("expected one planned cleanup rewrite, got %d", got)
+	}
+}
+
+func TestCalendarShiftsClampToValidDays(t *testing.T) {
+	jan31 := time.Date(2024, time.January, 31, 9, 15, 30, 0, time.UTC)
+	if got := shiftCalendarMonth(jan31, 1); got != time.Date(2024, time.February, 29, 9, 15, 30, 0, time.UTC) {
+		t.Fatalf("expected leap-year February to clamp to the 29th, got %s", got)
+	}
+	leapDay := time.Date(2024, time.February, 29, 9, 15, 30, 0, time.UTC)
+	if got := shiftCalendarYear(leapDay, 1); got != time.Date(2025, time.February, 28, 9, 15, 30, 0, time.UTC) {
+		t.Fatalf("expected non-leap year to clamp to 28 February, got %s", got)
 	}
 }
 
