@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/text/cases"
 )
 
 const (
@@ -22,6 +23,13 @@ const (
 	formCommitterDate
 	formMessage
 	formFieldCount
+)
+
+const (
+	bulkAuthorSearch = iota
+	bulkAuthorName
+	bulkAuthorEmail
+	bulkAuthorFieldCount
 )
 
 type uiFocus int
@@ -37,6 +45,7 @@ const (
 	overlayNone uiOverlay = iota
 	overlaySearch
 	overlayPath
+	overlayBulkAuthor
 	overlayConfirmApply
 	overlayConfirmForce
 	overlayHelp
@@ -148,6 +157,9 @@ type tuiModel struct {
 	confirmInput     textinput.Model
 	datePickerTime   time.Time
 	datePickerTarget int
+	bulkAuthorFocus  int
+	bulkAuthorInputs []textinput.Model
+	bulkAuthorExact  bool
 
 	forcePush       bool
 	pushTags        bool
@@ -195,19 +207,28 @@ func newTUIModel(app *App, initialPath string) tuiModel {
 	confirmInput := newTextInput()
 	confirmInput.Placeholder = "FORCE"
 
+	bulkAuthorInputs := make([]textinput.Model, bulkAuthorFieldCount)
+	for i := range bulkAuthorInputs {
+		bulkAuthorInputs[i] = newTextInput()
+	}
+	bulkAuthorInputs[bulkAuthorSearch].Placeholder = "Existing author name or email"
+	bulkAuthorInputs[bulkAuthorName].Placeholder = "Replacement author name"
+	bulkAuthorInputs[bulkAuthorEmail].Placeholder = "Replacement author email"
+
 	return tuiModel{
-		app:            app,
-		initialPath:    initialPath,
-		originalByHash: map[string]CommitRecord{},
-		draftByHash:    map[string]CommitRecord{},
-		inputs:         inputs,
-		message:        message,
-		searchInput:    searchInput,
-		pathInput:      pathInput,
-		confirmInput:   confirmInput,
-		pushTags:       true,
-		status:         "Loading repository...",
-		statusKind:     statusInfo,
+		app:              app,
+		initialPath:      initialPath,
+		originalByHash:   map[string]CommitRecord{},
+		draftByHash:      map[string]CommitRecord{},
+		inputs:           inputs,
+		message:          message,
+		searchInput:      searchInput,
+		pathInput:        pathInput,
+		confirmInput:     confirmInput,
+		bulkAuthorInputs: bulkAuthorInputs,
+		pushTags:         true,
+		status:           "Loading repository...",
+		statusKind:       statusInfo,
 	}
 }
 
@@ -318,6 +339,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateSearch(msg)
 	case overlayPath:
 		return m.updatePathEntry(msg)
+	case overlayBulkAuthor:
+		return m.updateBulkAuthor(msg)
 	case overlayConfirmApply, overlayConfirmForce:
 		return m.updateConfirmation(msg)
 	case overlayDatePicker:
@@ -340,6 +363,12 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p", "o":
 		m.overlay = overlayPath
 		m.focusPathInput()
+	case "b":
+		if m.repoLoaded {
+			m.openBulkAuthor()
+		} else {
+			m.setStatus("Load a repository before replacing authors.", statusError)
+		}
 	case "r":
 		if m.repository.Path != "" {
 			m.busy = true
@@ -427,6 +456,56 @@ func (m tuiModel) updatePathEntry(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.pathInput, cmd = m.pathInput.Update(msg)
+	return m, cmd
+}
+
+func (m tuiModel) updateBulkAuthor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.overlay = overlayNone
+		m.blurBulkAuthorInputs()
+		m.setStatus("Bulk author replacement cancelled.", statusInfo)
+		return m, nil
+	case "tab", "shift+tab":
+		delta := 1
+		if msg.String() == "shift+tab" {
+			delta = -1
+		}
+		next := (m.bulkAuthorFocus + delta + bulkAuthorFieldCount) % bulkAuthorFieldCount
+		m.focusBulkAuthorField(next)
+		return m, nil
+	case "ctrl+t":
+		m.bulkAuthorExact = !m.bulkAuthorExact
+		m.setStatus(fmt.Sprintf("Author match mode: %s.", authorMatchMode(m.bulkAuthorExact)), statusInfo)
+		return m, nil
+	case "enter":
+		m.syncFormToDraft()
+		matched, err := stageAuthorReplacement(
+			m.commits,
+			m.draftByHash,
+			m.bulkAuthorInputs[bulkAuthorSearch].Value(),
+			m.bulkAuthorInputs[bulkAuthorName].Value(),
+			m.bulkAuthorInputs[bulkAuthorEmail].Value(),
+			m.bulkAuthorExact,
+		)
+		if err != nil {
+			m.setStatus(err.Error(), statusError)
+			return m, nil
+		}
+		if matched == 0 {
+			m.setStatus("No author names or emails matched the search.", statusInfo)
+			return m, nil
+		}
+		m.overlay = overlayNone
+		m.blurBulkAuthorInputs()
+		m.reconcileSelection()
+		m.loadSelectedCommitIntoForm()
+		m.setStatus(fmt.Sprintf("Staged author replacement for %d commit%s.", matched, plural(matched)), statusSuccess)
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.bulkAuthorInputs[m.bulkAuthorFocus], cmd = m.bulkAuthorInputs[m.bulkAuthorFocus].Update(msg)
 	return m, cmd
 }
 
@@ -681,12 +760,15 @@ func (m tuiModel) renderBottomBar(width int) string {
 	}
 
 	status := lipgloss.NewStyle().Foreground(statusColor).Render(truncateText(m.status, contentWidth))
-	help := "Tab form/list  / search  p path  r reload  x reset  a apply  c co-authors  f force  t tags  ? help  q quit"
+	help := "Tab form/list  / search  b bulk author  p path  r reload  x reset  a apply  c co-authors  f force  t tags  ? help  q quit"
 	if m.focus == focusForm {
 		help = "Tab next field  Shift+Tab previous  Ctrl+T set focused date to now  Esc list  Ctrl+C quit"
 	}
 	if m.overlay == overlayPath {
 		help = "Enter load repository  Esc close"
+	}
+	if m.overlay == overlayBulkAuthor {
+		help = "Tab next field  Shift+Tab previous  Ctrl+T partial/exact  Enter stage  Esc cancel"
 	}
 	if m.overlay == overlayConfirmApply {
 		help = "Press y to rewrite history, n/Esc to cancel"
@@ -787,6 +869,8 @@ func (m tuiModel) renderDetailPane(width int, height int) string {
 	switch m.overlay {
 	case overlayPath:
 		content = m.renderPathPane(innerWidth, innerHeight)
+	case overlayBulkAuthor:
+		content = m.renderBulkAuthorPane(innerWidth, innerHeight)
 	case overlayConfirmApply, overlayConfirmForce:
 		content = m.renderConfirmPane(innerWidth, innerHeight)
 	case overlayHelp:
@@ -830,6 +914,29 @@ func (m tuiModel) renderDatePickerPane(width int, height int) string {
 		dimStyle.Render("Enter saves the selection. Esc keeps the original timestamp."),
 	)
 	return fitLines(lines, height, width)
+}
+
+func (m tuiModel) renderBulkAuthorPane(width int, height int) string {
+	lines := []string{
+		headerStyle.Render("Bulk replace author"),
+		"Search current draft author names and emails, then stage a new author identity on every matching commit.",
+		"",
+		m.renderBulkAuthorField(bulkAuthorSearch, "Search", width),
+		m.renderBulkAuthorField(bulkAuthorName, "Replacement author name", width),
+		m.renderBulkAuthorField(bulkAuthorEmail, "Replacement author email", width),
+		"",
+		fmt.Sprintf("Match mode: %s  %s", authorMatchMode(m.bulkAuthorExact), dimStyle.Render("(Ctrl+T to toggle)")),
+		dimStyle.Render("Press Enter to stage these changes. Use a to apply the history rewrite."),
+	}
+	return fitLines(wrapBlockLines(lines, width), height, width)
+}
+
+func (m tuiModel) renderBulkAuthorField(index int, label string, width int) string {
+	style := blurredFieldStyle
+	if m.overlay == overlayBulkAuthor && m.bulkAuthorFocus == index {
+		style = focusedFieldStyle
+	}
+	return renderBox(style, width, 0, fieldLabelStyle.Render(label)+"\n"+m.bulkAuthorInputs[index].View())
 }
 
 func (m tuiModel) renderPathPane(width int, height int) string {
@@ -879,7 +986,7 @@ func (m tuiModel) renderHelpPane(width int, height int) string {
 		"List: Up/Down, PgUp/PgDn, Home/End select commits.",
 		"Tab moves from the list into the commit form.",
 		"Form: Tab and Shift+Tab move through every editable value. Esc returns to the list.",
-		"/ searches commits. p opens a repository path prompt. r reloads history.",
+		"/ searches commits. b bulk-replaces author identities. p opens a repository path prompt. r reloads history.",
 		"x resets the selected commit. a applies edits. c toggles bulk Co-authored-by cleanup.",
 		"f toggles force push. t toggles tag push. Ctrl+T stamps the focused date field with the current local time.",
 		"",
@@ -1000,6 +1107,36 @@ func (m *tuiModel) updateComponentSizes() {
 	m.searchInput.Width = maxInt(16, width-10)
 	m.pathInput.Width = maxInt(4, contentWidthFor(focusedFieldStyle, innerRight))
 	m.confirmInput.Width = 12
+	for i := range m.bulkAuthorInputs {
+		m.bulkAuthorInputs[i].Width = maxInt(4, contentWidthFor(blurredFieldStyle, innerRight))
+	}
+}
+
+func (m *tuiModel) openBulkAuthor() {
+	m.blurForm()
+	m.searchInput.Blur()
+	m.pathInput.Blur()
+	m.confirmInput.Blur()
+	for i := range m.bulkAuthorInputs {
+		m.bulkAuthorInputs[i].SetValue("")
+	}
+	m.bulkAuthorExact = false
+	m.overlay = overlayBulkAuthor
+	m.focusBulkAuthorField(bulkAuthorSearch)
+	m.setStatus("Enter an author search and replacement identity.", statusInfo)
+}
+
+func (m *tuiModel) focusBulkAuthorField(index int) {
+	m.blurBulkAuthorInputs()
+	m.bulkAuthorFocus = clamp(index, 0, bulkAuthorFieldCount-1)
+	m.bulkAuthorInputs[m.bulkAuthorFocus].Focus()
+	m.bulkAuthorInputs[m.bulkAuthorFocus].CursorEnd()
+}
+
+func (m *tuiModel) blurBulkAuthorInputs() {
+	for i := range m.bulkAuthorInputs {
+		m.bulkAuthorInputs[i].Blur()
+	}
 }
 
 func (m *tuiModel) focusPathInput() {
@@ -1229,6 +1366,51 @@ func cloneCommitRecord(commit CommitRecord) CommitRecord {
 	clone.Refs = append([]string(nil), commit.Refs...)
 	clone.Parents = append([]string(nil), commit.Parents...)
 	return clone
+}
+
+func stageAuthorReplacement(commits []CommitRecord, draftByHash map[string]CommitRecord, query string, replacementName string, replacementEmail string, exact bool) (int, error) {
+	query = strings.TrimSpace(query)
+	replacementName = strings.TrimSpace(replacementName)
+	replacementEmail = strings.TrimSpace(replacementEmail)
+	if query == "" {
+		return 0, errors.New("author search is required")
+	}
+	if replacementName == "" {
+		return 0, errors.New("replacement author name is required")
+	}
+	if replacementEmail == "" {
+		return 0, errors.New("replacement author email is required")
+	}
+	fold := cases.Fold()
+	foldedQuery := fold.String(query)
+	matched := 0
+	for _, commit := range commits {
+		draft, ok := draftByHash[commit.Hash]
+		if !ok {
+			draft = cloneCommitRecord(commit)
+		}
+		nameMatches := strings.EqualFold(draft.AuthorName, query)
+		emailMatches := strings.EqualFold(draft.AuthorEmail, query)
+		if !exact {
+			nameMatches = strings.Contains(fold.String(draft.AuthorName), foldedQuery)
+			emailMatches = strings.Contains(fold.String(draft.AuthorEmail), foldedQuery)
+		}
+		if !nameMatches && !emailMatches {
+			continue
+		}
+		draft.AuthorName = replacementName
+		draft.AuthorEmail = replacementEmail
+		draftByHash[commit.Hash] = draft
+		matched++
+	}
+	return matched, nil
+}
+
+func authorMatchMode(exact bool) string {
+	if exact {
+		return "Exact"
+	}
+	return "Partial"
 }
 
 func selectionAfterFilter(commits []CommitRecord, draftByHash map[string]CommitRecord, selectedHash string, query string) ([]CommitRecord, int, string) {

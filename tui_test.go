@@ -39,6 +39,106 @@ func TestDirtyCommitCount(t *testing.T) {
 	}
 }
 
+func TestStageAuthorReplacementMatchesPartialIdentityCaseInsensitively(t *testing.T) {
+	commits := []CommitRecord{
+		{Hash: "one", AuthorName: "Foo Bar", AuthorEmail: "foo@bar.baz", CommitterName: "Release Bot", CommitterEmail: "bot@example.com"},
+		{Hash: "two", AuthorName: "Someone Else", AuthorEmail: "FOO@EXAMPLE.COM", CommitterName: "Other Bot", CommitterEmail: "other@example.com"},
+		{Hash: "three", AuthorName: "Unaffected", AuthorEmail: "unaffected@example.com", CommitterName: "Keep Me", CommitterEmail: "keep@example.com"},
+	}
+	drafts := cloneMapByHash(commits)
+
+	matched, err := stageAuthorReplacement(commits, drafts, "fOo", "New Author", "new@example.com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched != 2 {
+		t.Fatalf("expected two matching commits, got %d", matched)
+	}
+	if got := drafts["one"]; got.AuthorName != "New Author" || got.AuthorEmail != "new@example.com" {
+		t.Fatalf("expected first author identity to be replaced, got %#v", got)
+	} else if got.CommitterName != "Release Bot" || got.CommitterEmail != "bot@example.com" {
+		t.Fatalf("expected first committer identity to be preserved, got %#v", got)
+	}
+	if got := drafts["two"]; got.AuthorName != "New Author" || got.AuthorEmail != "new@example.com" {
+		t.Fatalf("expected second author identity to be replaced, got %#v", got)
+	} else if got.CommitterName != "Other Bot" || got.CommitterEmail != "other@example.com" {
+		t.Fatalf("expected second committer identity to be preserved, got %#v", got)
+	}
+	if got := drafts["three"]; got.AuthorName != "Unaffected" || got.AuthorEmail != "unaffected@example.com" {
+		t.Fatalf("expected non-matching author identity to be preserved, got %#v", got)
+	}
+}
+
+func TestStageAuthorReplacementExactModeRequiresWholeFieldMatch(t *testing.T) {
+	commits := []CommitRecord{
+		{Hash: "partial", AuthorName: "Foo Bar", AuthorEmail: "foo@bar.baz"},
+		{Hash: "exact", AuthorName: "FOO", AuthorEmail: "someone@example.com"},
+	}
+	drafts := cloneMapByHash(commits)
+
+	matched, err := stageAuthorReplacement(commits, drafts, "foo", "New Author", "new@example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched != 1 {
+		t.Fatalf("expected one exact match, got %d", matched)
+	}
+	if got := drafts["partial"]; got.AuthorName != "Foo Bar" || got.AuthorEmail != "foo@bar.baz" {
+		t.Fatalf("expected partial match to remain unchanged in exact mode, got %#v", got)
+	}
+	if got := drafts["exact"]; got.AuthorName != "New Author" || got.AuthorEmail != "new@example.com" {
+		t.Fatalf("expected exact match to be replaced, got %#v", got)
+	}
+}
+
+func TestStageAuthorReplacementPartialModeUsesUnicodeCaseFolding(t *testing.T) {
+	commits := []CommitRecord{
+		{Hash: "greek", AuthorName: "Σωκράτης", AuthorEmail: "socrates@example.com"},
+	}
+	drafts := cloneMapByHash(commits)
+
+	matched, err := stageAuthorReplacement(commits, drafts, "ΣΩΚΡΆΤΗΣ", "Socrates", "new@example.com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched != 1 {
+		t.Fatalf("expected Unicode case variants to match, got %d matches", matched)
+	}
+	if got := drafts["greek"]; got.AuthorName != "Socrates" || got.AuthorEmail != "new@example.com" {
+		t.Fatalf("expected Unicode author identity to be replaced, got %#v", got)
+	}
+}
+
+func TestStageAuthorReplacementRejectsBlankInputsWithoutChangingDrafts(t *testing.T) {
+	commits := []CommitRecord{{Hash: "one", AuthorName: "Foo Bar", AuthorEmail: "foo@bar.baz"}}
+	tests := []struct {
+		name             string
+		query            string
+		replacementName  string
+		replacementEmail string
+	}{
+		{name: "search", query: "  ", replacementName: "New Author", replacementEmail: "new@example.com"},
+		{name: "author name", query: "Foo", replacementName: "  ", replacementEmail: "new@example.com"},
+		{name: "author email", query: "Foo", replacementName: "New Author", replacementEmail: "  "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			drafts := cloneMapByHash(commits)
+			matched, err := stageAuthorReplacement(commits, drafts, tt.query, tt.replacementName, tt.replacementEmail, false)
+			if err == nil {
+				t.Fatal("expected blank input to be rejected")
+			}
+			if matched != 0 {
+				t.Fatalf("expected no matches on validation failure, got %d", matched)
+			}
+			if got := drafts["one"]; got.AuthorName != "Foo Bar" || got.AuthorEmail != "foo@bar.baz" {
+				t.Fatalf("expected drafts to remain unchanged on validation failure, got %#v", got)
+			}
+		})
+	}
+}
+
 func TestSelectionAfterFilterPreservesSelectedCommit(t *testing.T) {
 	commits := []CommitRecord{
 		{Hash: "one", ShortHash: "one", AuthorName: "A", Message: "alpha"},
@@ -112,6 +212,62 @@ func TestRepositoryLoadErrorOpensPathEntryState(t *testing.T) {
 	}
 	if model.pathInput.Value() != path {
 		t.Fatalf("expected path input to keep attempted path %q, got %q", path, model.pathInput.Value())
+	}
+}
+
+func TestBulkAuthorKeyOpensReplacementDialogInPartialMode(t *testing.T) {
+	model := newTUIModel(NewApp(), "/tmp/repo")
+	model.width = 100
+	model.height = 30
+	model.handleRepoLoaded(repoLoadedMsg{
+		repo: RepositoryState{Path: "/tmp/repo", Clean: true, CurrentBranch: "main"},
+		commits: []CommitRecord{
+			{Hash: "one", ShortHash: "one", AuthorName: "Foo Bar", AuthorEmail: "foo@bar.baz", Message: "first"},
+		},
+	})
+
+	updated, _ := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	view := updated.(tuiModel).View()
+	if !strings.Contains(view, "Bulk replace author") {
+		t.Fatalf("expected bulk author dialog after pressing b, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Match mode: Partial") {
+		t.Fatalf("expected partial match mode by default, got:\n%s", view)
+	}
+}
+
+func TestBulkAuthorDialogStagesExactAuthorReplacement(t *testing.T) {
+	model := newTUIModel(NewApp(), "/tmp/repo")
+	model.handleRepoLoaded(repoLoadedMsg{
+		repo: RepositoryState{Path: "/tmp/repo", Clean: true, CurrentBranch: "main"},
+		commits: []CommitRecord{
+			{Hash: "partial", ShortHash: "partial", AuthorName: "Foo Bar", AuthorEmail: "foo@bar.baz", Message: "partial"},
+			{Hash: "exact", ShortHash: "exact", AuthorName: "FOO", AuthorEmail: "someone@example.com", Message: "exact"},
+		},
+	})
+	send := func(msg tea.KeyMsg) {
+		t.Helper()
+		updated, _ := model.handleKey(msg)
+		model = updated.(tuiModel)
+	}
+
+	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("foo")})
+	send(tea.KeyMsg{Type: tea.KeyTab})
+	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("New Author")})
+	send(tea.KeyMsg{Type: tea.KeyTab})
+	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("new@example.com")})
+	send(tea.KeyMsg{Type: tea.KeyCtrlT})
+	send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := model.draftByHash["partial"]; got.AuthorName != "Foo Bar" || got.AuthorEmail != "foo@bar.baz" {
+		t.Fatalf("expected partial-only match to remain unchanged in exact mode, got %#v", got)
+	}
+	if got := model.draftByHash["exact"]; got.AuthorName != "New Author" || got.AuthorEmail != "new@example.com" {
+		t.Fatalf("expected exact match to be staged through the dialog, got %#v", got)
+	}
+	if model.overlay != overlayNone {
+		t.Fatalf("expected successful replacement to close the dialog, got overlay %v", model.overlay)
 	}
 }
 
