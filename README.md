@@ -13,6 +13,7 @@ Repository: https://github.com/andydixon/nexus
   - committer name, email, and date/time
   - full commit message
 - Search commits by hash, message, author name, or email
+- Bulk replace author names and emails using case-insensitive partial or exact matching
 - Track edited commits and reset the selected commit
 - Apply all staged metadata changes in one action
 - Optionally force push rewritten branches and tags to `origin`
@@ -23,6 +24,7 @@ Repository: https://github.com/andydixon/nexus
 - `Shift+Tab`: move backward through form fields
 - `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`: navigate commits
 - `/`: search commits
+- `b`: bulk replace matching author names and emails; `Ctrl+T` toggles partial/exact matching
 - `p`: switch repository path
 - `r`: reload history
 - `x`: reset the selected commit
@@ -67,4 +69,3 @@ History rewriting changes commit hashes and can disrupt shared branches. Coordin
 ## Licence
 
 This project is proprietary software. It is **not** released under the MIT licence.
-
