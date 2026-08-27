@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/text/cases"
 )
 
 const (
@@ -1246,6 +1247,8 @@ func stageAuthorReplacement(commits []CommitRecord, draftByHash map[string]Commi
 	if replacementEmail == "" {
 		return 0, errors.New("replacement author email is required")
 	}
+	fold := cases.Fold()
+	foldedQuery := fold.String(query)
 	matched := 0
 	for _, commit := range commits {
 		draft, ok := draftByHash[commit.Hash]
@@ -1255,9 +1258,8 @@ func stageAuthorReplacement(commits []CommitRecord, draftByHash map[string]Commi
 		nameMatches := strings.EqualFold(draft.AuthorName, query)
 		emailMatches := strings.EqualFold(draft.AuthorEmail, query)
 		if !exact {
-			lowerQuery := strings.ToLower(query)
-			nameMatches = strings.Contains(strings.ToLower(draft.AuthorName), lowerQuery)
-			emailMatches = strings.Contains(strings.ToLower(draft.AuthorEmail), lowerQuery)
+			nameMatches = strings.Contains(fold.String(draft.AuthorName), foldedQuery)
+			emailMatches = strings.Contains(fold.String(draft.AuthorEmail), foldedQuery)
 		}
 		if !nameMatches && !emailMatches {
 			continue

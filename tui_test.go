@@ -90,6 +90,24 @@ func TestStageAuthorReplacementExactModeRequiresWholeFieldMatch(t *testing.T) {
 	}
 }
 
+func TestStageAuthorReplacementPartialModeUsesUnicodeCaseFolding(t *testing.T) {
+	commits := []CommitRecord{
+		{Hash: "greek", AuthorName: "Σωκράτης", AuthorEmail: "socrates@example.com"},
+	}
+	drafts := cloneMapByHash(commits)
+
+	matched, err := stageAuthorReplacement(commits, drafts, "ΣΩΚΡΆΤΗΣ", "Socrates", "new@example.com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched != 1 {
+		t.Fatalf("expected Unicode case variants to match, got %d matches", matched)
+	}
+	if got := drafts["greek"]; got.AuthorName != "Socrates" || got.AuthorEmail != "new@example.com" {
+		t.Fatalf("expected Unicode author identity to be replaced, got %#v", got)
+	}
+}
+
 func TestStageAuthorReplacementRejectsBlankInputsWithoutChangingDrafts(t *testing.T) {
 	commits := []CommitRecord{{Hash: "one", AuthorName: "Foo Bar", AuthorEmail: "foo@bar.baz"}}
 	tests := []struct {
