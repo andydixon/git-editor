@@ -12,6 +12,8 @@ Repository: https://github.com/andydixon/nexus
   - author name, email, and date/time
   - committer name, email, and date/time
   - full commit message
+- Keyboard-driven calendar and time picker for author and committer timestamps
+- Opt-in bulk removal of `Co-authored-by:` trailer lines across commit messages
 - Search commits by hash, message, author name, or email
 - Track edited commits and reset the selected commit
 - Apply all staged metadata changes in one action
@@ -27,10 +29,13 @@ Repository: https://github.com/andydixon/nexus
 - `r`: reload history
 - `x`: reset the selected commit
 - `a`: apply changes
+- `c`: toggle bulk removal of `Co-authored-by:` lines
 - `f`: toggle force push
 - `t`: toggle tag push
 - `?`: show help
 - `q` or `Ctrl+C`: quit
+
+When an author or committer date field is focused, press `Enter` to open the date/time picker. Arrow keys adjust the day and hour, `PgUp`/`PgDn` adjust the month, `+`/`-` adjust by five minutes, and `H`/`L` adjust the year. Use `t` for now, `z` for local time, `u` for UTC, `Enter` to save, or `Esc` to cancel. `Ctrl+T` remains a quick shortcut for setting the focused date to now.
 
 ## Apply Workflow
 
@@ -38,9 +43,10 @@ When you apply changes, Nexus:
 
 1. Checks that the selected repository is clean.
 2. Creates a backup tag (`nexus-backup-<timestamp>`).
-3. Rewrites history with `git filter-branch` across all refs.
-4. Removes temporary rewrite references and runs repository cleanup.
-5. Optionally force pushes branches and tags using `--force-with-lease`.
+3. Applies timestamp, metadata, message, and optional co-author trailer changes.
+4. Rewrites history with `git filter-branch` across all refs.
+5. Removes temporary rewrite references and runs repository cleanup.
+6. Optionally force pushes branches and tags using `--force-with-lease`.
 
 Force push requires an explicit `FORCE` confirmation in the terminal.
 
@@ -67,4 +73,3 @@ History rewriting changes commit hashes and can disrupt shared branches. Coordin
 ## Licence
 
 This project is proprietary software. It is **not** released under the MIT licence.
-
