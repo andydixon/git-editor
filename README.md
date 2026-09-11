@@ -13,7 +13,7 @@ Repository: https://github.com/andydixon/nexus
   - committer name, email, and date/time
   - full commit message
 - Keyboard-driven calendar and time picker for author and committer timestamps
-- Opt-in bulk removal of `Co-authored-by:` trailer lines across commit messages
+- Opt-in bulk removal of `Co-authored-by:` and `Claude-Session:` lines across commit messages; Claude and Codex attribution blocks are removed whole
 - Search commits by hash, message, author name, or email
 - Bulk replace author names and emails using case-insensitive partial or exact matching
 - Track edited commits and reset the selected commit
@@ -31,7 +31,7 @@ Repository: https://github.com/andydixon/nexus
 - `r`: reload history
 - `x`: reset the selected commit
 - `a`: apply changes
-- `c`: toggle bulk removal of `Co-authored-by:` lines
+- `c`: toggle bulk removal of `Co-authored-by:` trailers and `Claude-Session:` lines
 - `f`: toggle force push
 - `t`: toggle tag push
 - `?`: show help

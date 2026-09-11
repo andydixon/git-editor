@@ -529,20 +529,34 @@ func formatGitDate(value time.Time) string {
 }
 
 var coAuthorLinePattern = regexp.MustCompile(`(?i)^\s*co-authored(?:-|\s+)by\s*:`)
+var aiAttributionPattern = regexp.MustCompile(`(?i)^\s*co-authored(?:-|\s+)by\s*:.*\b(claude|codex)\b`)
 
+// removeCoAuthorLines drops Co-authored-by trailer lines and Claude-Session:
+// lines. A Claude or Codex co-author line also takes the contiguous non-blank
+// lines that follow it (its attribution block). Returns the number of lines removed.
 func removeCoAuthorLines(message string) (string, int) {
 	lines := strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n")
 	kept := make([]string, 0, len(lines))
 	removed := 0
+	inBlock := false
 	for _, line := range lines {
-		if coAuthorLinePattern.MatchString(line) {
-			removed++
+		switch {
+		case aiAttributionPattern.MatchString(line):
+			inBlock = true
+		case inBlock && strings.TrimSpace(line) != "":
+		case coAuthorLinePattern.MatchString(line), strings.Contains(strings.ToLower(line), "claude-session:"):
+			inBlock = false
+		default:
+			inBlock = false
+			kept = append(kept, line)
 			continue
 		}
-		kept = append(kept, line)
+		removed++
 	}
-	return normalizeMessage(strings.Join(kept, "\n")), removed
+	return normalizeMessage(blankRunPattern.ReplaceAllString(strings.Join(kept, "\n"), "\n\n")), removed
 }
+
+var blankRunPattern = regexp.MustCompile(`\n(?:[ \t]*\n){2,}`)
 
 func editableFieldsChanged(current CommitRecord, incoming CommitRecord) bool {
 	return current.AuthorName != incoming.AuthorName ||

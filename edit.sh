@@ -10,7 +10,7 @@ Usage:
 
 What it does:
   - Rewrites reachable Git history in the current repository.
-  - Removes lines starting with "Co-Authored" from commit messages.
+  - Removes "Co-Authored" and "Claude-Session:" lines; Claude/Codex co-author blocks are removed whole.
   - Sets author and committer name/email to the values you provide.
   - Moves commit times to either:
       00:00-07:30
@@ -166,15 +166,21 @@ PY
 
 # Write the message callback.
 cat >"${MESSAGE_CALLBACK_FILE}" <<'PY'
-# Remove any line that starts with "Co-Authored", case-insensitively.
+# Remove Claude/Codex co-author lines together with the non-blank lines that
+# follow them, then any other "Co-Authored" or "Claude-Session:" lines.
 message = re.sub(
-    br'(?im)^[ \t]*Co-Authored[^\r\n]*(?:\r?\n|$)',
+    br'(?im)^[ \t]*Co-Authored[^\r\n]*\b(?:claude|codex)\b[^\r\n]*(?:\r?\n[^\r\n]+)*(?:\r?\n|$)',
+    b'',
+    message,
+)
+message = re.sub(
+    br'(?im)^(?:[ \t]*Co-Authored|[^\r\n]*Claude-Session:)[^\r\n]*(?:\r?\n|$)',
     b'',
     message,
 )
 
-# Trim excessive blank lines from the end of the message.
-message = re.sub(br'(?:\r?\n){3,}$', b'\n\n', message)
+# Collapse runs of blank lines left behind and trim the end of the message.
+message = re.sub(br'(?:\r?\n){3,}', b'\n\n', message)
 
 # Return the rewritten message bytes.
 return message
