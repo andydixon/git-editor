@@ -3,7 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +34,14 @@ const (
 	bulkAuthorFieldCount
 )
 
+const (
+	dateSpreadStartDay = iota
+	dateSpreadEndDay
+	dateSpreadFromTime
+	dateSpreadToTime
+	dateSpreadFieldCount
+)
+
 type uiFocus int
 
 const (
@@ -50,6 +60,7 @@ const (
 	overlayConfirmForce
 	overlayHelp
 	overlayDatePicker
+	overlayDateSpread
 )
 
 type statusKind string
@@ -160,6 +171,8 @@ type tuiModel struct {
 	bulkAuthorFocus  int
 	bulkAuthorInputs []textinput.Model
 	bulkAuthorExact  bool
+	dateSpreadFocus  int
+	dateSpreadInputs []textinput.Model
 
 	forcePush       bool
 	pushTags        bool
@@ -215,7 +228,17 @@ func newTUIModel(app *App, initialPath string) tuiModel {
 	bulkAuthorInputs[bulkAuthorName].Placeholder = "Replacement author name"
 	bulkAuthorInputs[bulkAuthorEmail].Placeholder = "Replacement author email"
 
+	dateSpreadInputs := make([]textinput.Model, dateSpreadFieldCount)
+	for i := range dateSpreadInputs {
+		dateSpreadInputs[i] = newTextInput()
+	}
+	dateSpreadInputs[dateSpreadStartDay].Placeholder = "YYYY-MM-DD"
+	dateSpreadInputs[dateSpreadEndDay].Placeholder = "YYYY-MM-DD"
+	dateSpreadInputs[dateSpreadFromTime].Placeholder = "08:00"
+	dateSpreadInputs[dateSpreadToTime].Placeholder = "12:00"
+
 	return tuiModel{
+		dateSpreadInputs: dateSpreadInputs,
 		app:              app,
 		initialPath:      initialPath,
 		originalByHash:   map[string]CommitRecord{},
@@ -341,6 +364,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updatePathEntry(msg)
 	case overlayBulkAuthor:
 		return m.updateBulkAuthor(msg)
+	case overlayDateSpread:
+		return m.updateDateSpread(msg)
 	case overlayConfirmApply, overlayConfirmForce:
 		return m.updateConfirmation(msg)
 	case overlayDatePicker:
@@ -368,6 +393,12 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openBulkAuthor()
 		} else {
 			m.setStatus("Load a repository before replacing authors.", statusError)
+		}
+	case "d":
+		if m.repoLoaded {
+			m.openDateSpread()
+		} else {
+			m.setStatus("Load a repository before rewriting dates.", statusError)
 		}
 	case "r":
 		if m.repository.Path != "" {
@@ -506,6 +537,40 @@ func (m tuiModel) updateBulkAuthor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.bulkAuthorInputs[m.bulkAuthorFocus], cmd = m.bulkAuthorInputs[m.bulkAuthorFocus].Update(msg)
+	return m, cmd
+}
+
+func (m tuiModel) updateDateSpread(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.overlay = overlayNone
+		m.blurInputs(m.dateSpreadInputs)
+		m.setStatus("Date rewrite cancelled.", statusInfo)
+		return m, nil
+	case "tab", "shift+tab":
+		delta := 1
+		if msg.String() == "shift+tab" {
+			delta = -1
+		}
+		m.focusDateSpreadField((m.dateSpreadFocus + delta + dateSpreadFieldCount) % dateSpreadFieldCount)
+		return m, nil
+	case "enter":
+		m.syncFormToDraft()
+		v := func(i int) string { return m.dateSpreadInputs[i].Value() }
+		count, err := stageDateSpread(m.commits, m.draftByHash, v(dateSpreadStartDay), v(dateSpreadEndDay), v(dateSpreadFromTime), v(dateSpreadToTime), rand.Int63n)
+		if err != nil {
+			m.setStatus(err.Error(), statusError)
+			return m, nil
+		}
+		m.overlay = overlayNone
+		m.blurInputs(m.dateSpreadInputs)
+		m.loadSelectedCommitIntoForm()
+		m.setStatus(fmt.Sprintf("Staged new timestamps for %d commit%s.", count, plural(count)), statusSuccess)
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.dateSpreadInputs[m.dateSpreadFocus], cmd = m.dateSpreadInputs[m.dateSpreadFocus].Update(msg)
 	return m, cmd
 }
 
@@ -760,7 +825,7 @@ func (m tuiModel) renderBottomBar(width int) string {
 	}
 
 	status := lipgloss.NewStyle().Foreground(statusColor).Render(truncateText(m.status, contentWidth))
-	help := "Tab form/list  / search  b bulk author  p path  r reload  x reset  a apply  c co-authors  f force  t tags  ? help  q quit"
+	help := "Tab form/list  / search  b bulk author  d dates  p path  r reload  x reset  a apply  c co-authors  f force  t tags  ? help  q quit"
 	if m.focus == focusForm {
 		help = "Tab next field  Shift+Tab previous  Ctrl+T set focused date to now  Esc list  Ctrl+C quit"
 	}
@@ -769,6 +834,9 @@ func (m tuiModel) renderBottomBar(width int) string {
 	}
 	if m.overlay == overlayBulkAuthor {
 		help = "Tab next field  Shift+Tab previous  Ctrl+T partial/exact  Enter stage  Esc cancel"
+	}
+	if m.overlay == overlayDateSpread {
+		help = "Tab next field  Shift+Tab previous  Enter stage  Esc cancel"
 	}
 	if m.overlay == overlayConfirmApply {
 		help = "Press y to rewrite history, n/Esc to cancel"
@@ -871,6 +939,8 @@ func (m tuiModel) renderDetailPane(width int, height int) string {
 		content = m.renderPathPane(innerWidth, innerHeight)
 	case overlayBulkAuthor:
 		content = m.renderBulkAuthorPane(innerWidth, innerHeight)
+	case overlayDateSpread:
+		content = m.renderDateSpreadPane(innerWidth, innerHeight)
 	case overlayConfirmApply, overlayConfirmForce:
 		content = m.renderConfirmPane(innerWidth, innerHeight)
 	case overlayHelp:
@@ -931,6 +1001,28 @@ func (m tuiModel) renderBulkAuthorPane(width int, height int) string {
 	return fitLines(wrapBlockLines(lines, width), height, width)
 }
 
+func (m tuiModel) renderDateSpreadPane(width int, height int) string {
+	field := func(index int, label string) string {
+		style := blurredFieldStyle
+		if m.dateSpreadFocus == index {
+			style = focusedFieldStyle
+		}
+		return renderBox(style, width, 0, fieldLabelStyle.Render(label)+"\n"+m.dateSpreadInputs[index].View())
+	}
+	lines := []string{
+		headerStyle.Render("Rewrite all timestamps"),
+		"Give every commit, oldest first, a random author and committer timestamp between the start and end dates, within the daily time window. Each timestamp is never earlier than the one before it.",
+		"",
+		field(dateSpreadStartDay, "Start date"),
+		field(dateSpreadEndDay, "End date"),
+		field(dateSpreadFromTime, "Daily window from (HH:MM)"),
+		field(dateSpreadToTime, "Daily window to (HH:MM)"),
+		"",
+		dimStyle.Render("Press Enter to stage these changes. Use a to apply the history rewrite."),
+	}
+	return fitLines(wrapBlockLines(lines, width), height, width)
+}
+
 func (m tuiModel) renderBulkAuthorField(index int, label string, width int) string {
 	style := blurredFieldStyle
 	if m.overlay == overlayBulkAuthor && m.bulkAuthorFocus == index {
@@ -986,7 +1078,7 @@ func (m tuiModel) renderHelpPane(width int, height int) string {
 		"List: Up/Down, PgUp/PgDn, Home/End select commits.",
 		"Tab moves from the list into the commit form.",
 		"Form: Tab and Shift+Tab move through every editable value. Esc returns to the list.",
-		"/ searches commits. b bulk-replaces author identities. p opens a repository path prompt. r reloads history.",
+		"/ searches commits. b bulk-replaces author identities. d spreads all timestamps across a date range. p opens a repository path prompt. r reloads history.",
 		"x resets the selected commit. a applies edits. c toggles bulk Co-authored-by cleanup.",
 		"f toggles force push. t toggles tag push. Ctrl+T stamps the focused date field with the current local time.",
 		"",
@@ -1124,6 +1216,29 @@ func (m *tuiModel) openBulkAuthor() {
 	m.overlay = overlayBulkAuthor
 	m.focusBulkAuthorField(bulkAuthorSearch)
 	m.setStatus("Enter an author search and replacement identity.", statusInfo)
+}
+
+func (m *tuiModel) openDateSpread() {
+	m.blurForm()
+	m.searchInput.Blur()
+	m.pathInput.Blur()
+	m.confirmInput.Blur()
+	m.overlay = overlayDateSpread
+	m.focusDateSpreadField(dateSpreadStartDay)
+	m.setStatus("Enter a date range and daily time window.", statusInfo)
+}
+
+func (m *tuiModel) focusDateSpreadField(index int) {
+	m.blurInputs(m.dateSpreadInputs)
+	m.dateSpreadFocus = clamp(index, 0, dateSpreadFieldCount-1)
+	m.dateSpreadInputs[m.dateSpreadFocus].Focus()
+	m.dateSpreadInputs[m.dateSpreadFocus].CursorEnd()
+}
+
+func (m *tuiModel) blurInputs(inputs []textinput.Model) {
+	for i := range inputs {
+		inputs[i].Blur()
+	}
 }
 
 func (m *tuiModel) focusBulkAuthorField(index int) {
@@ -1404,6 +1519,61 @@ func stageAuthorReplacement(commits []CommitRecord, draftByHash map[string]Commi
 		matched++
 	}
 	return matched, nil
+}
+
+// stageDateSpread gives every commit (oldest first) the same author and
+// committer timestamp: a random day in [startDay, endDay] at a random time in
+// [fromTime, toTime), in local time. Sorting the random instants keeps them
+// non-decreasing. randN returns a value in [0, n).
+func stageDateSpread(commits []CommitRecord, draftByHash map[string]CommitRecord, startDay, endDay, fromTime, toTime string, randN func(int64) int64) (int, error) {
+	start, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(startDay), time.Local)
+	if err != nil {
+		return 0, errors.New("start date must be YYYY-MM-DD")
+	}
+	end, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(endDay), time.Local)
+	if err != nil {
+		return 0, errors.New("end date must be YYYY-MM-DD")
+	}
+	if end.Before(start) {
+		return 0, errors.New("end date must not be before start date")
+	}
+	from, err := time.Parse("15:04", strings.TrimSpace(fromTime))
+	if err != nil {
+		return 0, errors.New("window start must be HH:MM")
+	}
+	to, err := time.Parse("15:04", strings.TrimSpace(toTime))
+	if err != nil {
+		return 0, errors.New("window end must be HH:MM")
+	}
+	window := int64(to.Sub(from) / time.Second)
+	if window <= 0 {
+		return 0, errors.New("window end must be after window start")
+	}
+
+	days := int64(0)
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		days++
+	}
+	stamps := make([]time.Time, len(commits))
+	for i := range stamps {
+		day := start.AddDate(0, 0, int(randN(days)))
+		base := time.Date(day.Year(), day.Month(), day.Day(), from.Hour(), from.Minute(), 0, 0, time.Local)
+		stamps[i] = base.Add(time.Duration(randN(window)) * time.Second)
+	}
+	sort.Slice(stamps, func(i, j int) bool { return stamps[i].Before(stamps[j]) })
+
+	// commits is newest first; walk it oldest first.
+	for i := range commits {
+		commit := commits[len(commits)-1-i]
+		draft, ok := draftByHash[commit.Hash]
+		if !ok {
+			draft = cloneCommitRecord(commit)
+		}
+		draft.AuthorDate = formatGitDate(stamps[i])
+		draft.CommitterDate = draft.AuthorDate
+		draftByHash[commit.Hash] = draft
+	}
+	return len(commits), nil
 }
 
 func authorMatchMode(exact bool) string {

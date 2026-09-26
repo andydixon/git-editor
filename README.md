@@ -16,6 +16,7 @@ Repository: https://github.com/andydixon/nexus
 - Opt-in bulk removal of `Co-authored-by:` and `Claude-Session:` lines across commit messages; Claude and Codex attribution blocks are removed whole
 - Search commits by hash, message, author name, or email
 - Bulk replace author names and emails using case-insensitive partial or exact matching
+- Rewrite every commit's author and committer timestamps to random, in-order times within a date range and daily time window
 - Track edited commits and reset the selected commit
 - Apply all staged metadata changes in one action
 - Optionally force push rewritten branches and tags to `origin`
@@ -27,6 +28,7 @@ Repository: https://github.com/andydixon/nexus
 - `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`: navigate commits
 - `/`: search commits
 - `b`: bulk replace matching author names and emails; `Ctrl+T` toggles partial/exact matching
+- `d`: rewrite all timestamps: pick a start/end date and a daily window (e.g. `08:00`–`12:00`); from the oldest commit forwards each commit gets a random time in range, never earlier than the previous one
 - `p`: switch repository path
 - `r`: reload history
 - `x`: reset the selected commit

@@ -366,3 +366,39 @@ func maxRenderedLineWidth(value string) int {
 	}
 	return width
 }
+
+func TestStageDateSpreadOrdersTimestampsWithinWindow(t *testing.T) {
+	// newest first, as the TUI holds them
+	commits := []CommitRecord{{Hash: "c"}, {Hash: "b"}, {Hash: "a"}}
+	drafts := cloneMapByHash(commits)
+	// Reverse-ordered random draws would break ordering without the sort.
+	draws := []int64{2, 3000, 0, 100, 1, 50}
+	randN := func(n int64) int64 { v := draws[0] % n; draws = draws[1:]; return v }
+
+	count, err := stageDateSpread(commits, drafts, "2024-03-01", "2024-03-03", "08:00", "12:00", randN)
+	if err != nil || count != 3 {
+		t.Fatalf("expected 3 staged commits, got %d, %v", count, err)
+	}
+	var prev time.Time
+	for _, hash := range []string{"a", "b", "c"} {
+		d := drafts[hash]
+		if d.AuthorDate != d.CommitterDate {
+			t.Fatalf("%s: author and committer dates differ: %s vs %s", hash, d.AuthorDate, d.CommitterDate)
+		}
+		ts, err := parseGitDate(d.AuthorDate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ts.Before(prev) {
+			t.Fatalf("%s: %s is before previous %s", hash, ts, prev)
+		}
+		if ts.Hour() < 8 || ts.Hour() >= 12 || ts.Day() < 1 || ts.Day() > 3 {
+			t.Fatalf("%s: %s outside range", hash, ts)
+		}
+		prev = ts
+	}
+
+	if _, err := stageDateSpread(commits, drafts, "2024-03-01", "2024-03-03", "12:00", "08:00", randN); err == nil {
+		t.Fatal("expected inverted window to be rejected")
+	}
+}
