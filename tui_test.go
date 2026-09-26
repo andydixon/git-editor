@@ -402,3 +402,26 @@ func TestStageDateSpreadOrdersTimestampsWithinWindow(t *testing.T) {
 		t.Fatal("expected inverted window to be rejected")
 	}
 }
+
+func TestAICommitHashesIncludesMergesOfAIBranches(t *testing.T) {
+	commits := []CommitRecord{
+		{Hash: "root", Message: "init"},
+		{Hash: "human", Parents: []string{"root"}, Message: "human work"},
+		{Hash: "bot", Parents: []string{"root"}, AuthorName: "Codex", Message: "feature"},
+		{Hash: "trailer", Parents: []string{"human"}, Message: "fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>"},
+		{Hash: "mergeAI", Parents: []string{"trailer", "bot"}, Message: "Merge branch 'feature'"},
+		{Hash: "side", Parents: []string{"root"}, Message: "plain"},
+		{Hash: "mergePlain", Parents: []string{"mergeAI", "side"}, Message: "Merge branch 'other'"},
+	}
+	got := aiCommitHashes(commits)
+	for _, h := range []string{"bot", "trailer", "mergeAI"} {
+		if !got[h] {
+			t.Errorf("%s should be flagged", h)
+		}
+	}
+	for _, h := range []string{"root", "human", "side", "mergePlain"} {
+		if got[h] {
+			t.Errorf("%s should not be flagged", h)
+		}
+	}
+}

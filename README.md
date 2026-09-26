@@ -33,6 +33,7 @@ Repository: https://github.com/andydixon/nexus
 - `r`: reload history
 - `x`: reset the selected commit
 - `a`: apply changes
+- `i`: show only commits made by Claude or Codex (author, committer, or message mentions), plus merge commits that brought them in from another branch
 - `c`: toggle bulk removal of `Co-authored-by:` trailers and `Claude-Session:` lines
 - `f`: toggle force push
 - `t`: toggle tag push

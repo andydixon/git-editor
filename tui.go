@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -177,6 +178,8 @@ type tuiModel struct {
 	forcePush       bool
 	pushTags        bool
 	removeCoAuthors bool
+	aiOnly          bool
+	aiHashes        map[string]bool
 	busy            bool
 
 	status     string
@@ -313,6 +316,7 @@ func (m *tuiModel) handleRepoLoaded(msg repoLoadedMsg) {
 	m.commits = newestFirst(msg.commits)
 	m.originalByHash = mapByHash(m.commits)
 	m.draftByHash = cloneMapByHash(m.commits)
+	m.aiHashes = aiCommitHashes(m.commits)
 	m.pathInput.SetValue(msg.repo.Path)
 	m.reconcileSelection()
 	m.loadSelectedCommitIntoForm()
@@ -418,6 +422,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.removeCoAuthors = !m.removeCoAuthors
 		count, lines := coAuthorCleanupImpact(m.commits, m.draftByHash)
 		m.setStatus(fmt.Sprintf("Co-author cleanup %s: %d line%s across %d commit%s", onOff(m.removeCoAuthors), lines, plural(lines), count, plural(count)), statusInfo)
+	case "i":
+		m.aiOnly = !m.aiOnly
+		m.reconcileSelection()
+		m.loadSelectedCommitIntoForm()
+		m.setStatus(fmt.Sprintf("Claude/Codex filter %s: %d commit%s", onOff(m.aiOnly), len(m.aiHashes), plural(len(m.aiHashes))), statusInfo)
 	case "a":
 		return m.beginApply()
 	case "x":
@@ -438,7 +447,7 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "home":
 		m.moveSelectionTo(0)
 	case "end":
-		filtered, _, _ := selectionAfterFilter(m.commits, m.draftByHash, m.selectedHash, m.searchInput.Value())
+		filtered, _, _ := selectionAfterFilter(m.listCommits(), m.draftByHash, m.selectedHash, m.searchInput.Value())
 		m.moveSelectionTo(len(filtered) - 1)
 	}
 
@@ -825,7 +834,7 @@ func (m tuiModel) renderBottomBar(width int) string {
 	}
 
 	status := lipgloss.NewStyle().Foreground(statusColor).Render(truncateText(m.status, contentWidth))
-	help := "Tab form/list  / search  b bulk author  d dates  p path  r reload  x reset  a apply  c co-authors  f force  t tags  ? help  q quit"
+	help := "Tab form/list  / search  b bulk author  d dates  p path  r reload  x reset  a apply  c co-authors  i claude/codex  f force  t tags  ? help  q quit"
 	if m.focus == focusForm {
 		help = "Tab next field  Shift+Tab previous  Ctrl+T set focused date to now  Esc list  Ctrl+C quit"
 	}
@@ -859,8 +868,11 @@ func (m tuiModel) renderCommitPane(width int, height int) string {
 	innerWidth := maxInt(1, contentWidthFor(style, width))
 	innerHeight := maxInt(1, contentHeightFor(style, height))
 
-	filtered, selectedIndex, _ := selectionAfterFilter(m.commits, m.draftByHash, m.selectedHash, m.searchInput.Value())
+	filtered, selectedIndex, _ := selectionAfterFilter(m.listCommits(), m.draftByHash, m.selectedHash, m.searchInput.Value())
 	header := headerStyle.Render(fmt.Sprintf("Commits %d/%d", len(filtered), len(m.commits)))
+	if m.aiOnly {
+		header += " " + dimStyle.Render("[AI]")
+	}
 	if m.searchInput.Value() != "" {
 		header += " " + dimStyle.Render("/"+truncateText(m.searchInput.Value(), innerWidth-12))
 	}
@@ -1079,7 +1091,7 @@ func (m tuiModel) renderHelpPane(width int, height int) string {
 		"Tab moves from the list into the commit form.",
 		"Form: Tab and Shift+Tab move through every editable value. Esc returns to the list.",
 		"/ searches commits. b bulk-replaces author identities. d spreads all timestamps across a date range. p opens a repository path prompt. r reloads history.",
-		"x resets the selected commit. a applies edits. c toggles bulk Co-authored-by cleanup.",
+		"x resets the selected commit. a applies edits. c toggles bulk Co-authored-by cleanup. i shows only Claude/Codex commits and merges that brought them in.",
 		"f toggles force push. t toggles tag push. Ctrl+T stamps the focused date field with the current local time.",
 		"",
 		headerStyle.Render("Safety"),
@@ -1282,7 +1294,7 @@ func (m *tuiModel) blurForm() {
 
 func (m *tuiModel) reconcileSelection() {
 	previousHash := m.selectedHash
-	filtered, index, hash := selectionAfterFilter(m.commits, m.draftByHash, m.selectedHash, m.searchInput.Value())
+	filtered, index, hash := selectionAfterFilter(m.listCommits(), m.draftByHash, m.selectedHash, m.searchInput.Value())
 	if len(filtered) == 0 {
 		m.selectedHash = ""
 		m.selectedIndex = 0
@@ -1314,7 +1326,7 @@ func (m *tuiModel) ensureSelectionVisible(total int) {
 }
 
 func (m *tuiModel) moveSelection(delta int) {
-	filtered, selectedIndex, _ := selectionAfterFilter(m.commits, m.draftByHash, m.selectedHash, m.searchInput.Value())
+	filtered, selectedIndex, _ := selectionAfterFilter(m.listCommits(), m.draftByHash, m.selectedHash, m.searchInput.Value())
 	if len(filtered) == 0 {
 		return
 	}
@@ -1327,7 +1339,7 @@ func (m *tuiModel) moveSelection(delta int) {
 }
 
 func (m *tuiModel) moveSelectionTo(index int) {
-	filtered, _, _ := selectionAfterFilter(m.commits, m.draftByHash, m.selectedHash, m.searchInput.Value())
+	filtered, _, _ := selectionAfterFilter(m.listCommits(), m.draftByHash, m.selectedHash, m.searchInput.Value())
 	if len(filtered) == 0 {
 		return
 	}
@@ -1594,6 +1606,64 @@ func selectionAfterFilter(commits []CommitRecord, draftByHash map[string]CommitR
 		}
 	}
 	return filtered, 0, filtered[0].Hash
+}
+
+func (m tuiModel) listCommits() []CommitRecord {
+	if !m.aiOnly {
+		return m.commits
+	}
+	filtered := make([]CommitRecord, 0, len(m.aiHashes))
+	for _, commit := range m.commits {
+		if m.aiHashes[commit.Hash] {
+			filtered = append(filtered, commit)
+		}
+	}
+	return filtered
+}
+
+var aiIdentityPattern = regexp.MustCompile(`(?i)\b(claude|codex|anthropic)\b`)
+
+// aiCommitHashes marks commits whose author, committer, or message mentions
+// Claude/Codex, plus merge commits whose merged-in side contains such a commit.
+func aiCommitHashes(commits []CommitRecord) map[string]bool {
+	byHash := mapByHash(commits)
+	ai := map[string]bool{}
+	for _, c := range commits {
+		if aiIdentityPattern.MatchString(strings.Join([]string{c.AuthorName, c.AuthorEmail, c.CommitterName, c.CommitterEmail, c.Message}, "\n")) {
+			ai[c.Hash] = true
+		}
+	}
+	// ponytail: full ancestor walk per merge, O(commits x merges); memoise if huge repos crawl.
+	walk := func(start []string, skip map[string]bool, visit func(string) bool) map[string]bool {
+		seen := map[string]bool{}
+		stack := append([]string(nil), start...)
+		for len(stack) > 0 {
+			h := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if seen[h] || skip[h] {
+				continue
+			}
+			seen[h] = true
+			if visit(h) {
+				return seen
+			}
+			stack = append(stack, byHash[h].Parents...)
+		}
+		return seen
+	}
+	for _, c := range commits {
+		if len(c.Parents) < 2 || ai[c.Hash] {
+			continue
+		}
+		base := walk(c.Parents[:1], nil, func(string) bool { return false })
+		walk(c.Parents[1:], base, func(h string) bool {
+			if ai[h] {
+				ai[c.Hash] = true
+			}
+			return ai[c.Hash]
+		})
+	}
+	return ai
 }
 
 func filterCommits(commits []CommitRecord, draftByHash map[string]CommitRecord, query string) []CommitRecord {
