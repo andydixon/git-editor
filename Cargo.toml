@@ -1,0 +1,12 @@
+[package]
+name = "git-edit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+rand = "0.9"
+ratatui = "0.29"
+regex = "1.13.1"
+tui-textarea = "0.7"
+unicode-width = "0.2"

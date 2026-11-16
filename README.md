@@ -6,7 +6,7 @@ Repository: https://github.com/andydixon/nexus
 
 ## Features
 
-- Launches in the current Git repository by default, or with `nexus /path/to/repo`
+- Runs as a Git subcommand: `git edit` opens the current repository, `git edit /path/to/repo` opens another
 - Left-hand commit browser with hash, timestamp, author, and wrapped commit summary
 - Right-hand commit editor for:
   - author name, email, and date/time
@@ -55,11 +55,19 @@ When you apply changes, Nexus:
 
 Force push requires an explicit `FORCE` confirmation in the terminal.
 
-## Run
+## Install
+
+Requires Rust (stable) and Git.
 
 ```bash
-go run .          # open the current directory
-go run . ~/repo   # open a specific repository
+cargo install --path .   # installs git-edit into ~/.cargo/bin
+```
+
+Git runs any `git-<name>` executable on your `PATH` as `git <name>`, so once `git-edit` is on your `PATH`:
+
+```bash
+git edit          # open the current repository
+git edit ~/repo   # open a specific repository
 ```
 
 If the launch directory is not a Git worktree, Nexus opens a path-entry screen instead of exiting.
@@ -67,8 +75,8 @@ If the launch directory is not a Git worktree, Nexus opens a path-entry screen i
 ## Build
 
 ```bash
-./build.sh
-./bin/nexus
+./build.sh        # release build, copied to ./bin/git-edit
+cargo test
 ```
 
 ## Safety
