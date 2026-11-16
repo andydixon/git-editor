@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml"
 mkdir -p "$ROOT_DIR/bin"
-go build -o "$ROOT_DIR/bin/giteditor" "$ROOT_DIR"
+cp "$ROOT_DIR/target/release/git-edit" "$ROOT_DIR/bin/git-edit"
 
-echo "Built $ROOT_DIR/bin/giteditor"
-
+echo "Built $ROOT_DIR/bin/git-edit"
+echo "Put it on your PATH (or run 'cargo install --path .') to use it as 'git edit'."
